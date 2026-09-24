@@ -1,0 +1,6 @@
+.env
+__pycache__/
+*.pyc
+alerted_tokens.json
+.venv/
+venv/
