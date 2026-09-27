@@ -138,3 +138,17 @@ if __name__ == "__main__":
     # Port untuk Render (Prioritaskan os.getenv PORT dari Render)
     port = int(os.environ.get("PORT", getattr(config, "PORT", 10000)))
     app.run(host="0.0.0.0", port=port)
+if __name__ == "__main__":
+    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
+        logger.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID belum diset -- alert tidak akan terkirim.")
+    else:
+        # Kirim notifikasi konfirmasi ke Telegram Anda saat Render berhasil online
+        try:
+            bot.send_message(
+                config.TELEGRAM_CHAT_ID,
+                "🚀 <b>PUMPALPHA BOT ONLINE DI RENDER!</b>\nRadar Solana/Pump.fun aktif memantau koin gem.",
+                parse_mode="HTML"
+            )
+            logger.info("Notifikasi startup sukses dikirim ke Telegram!")
+        except Exception as e:
+            logger.error(f"Gagal kirim startup: {e}")
