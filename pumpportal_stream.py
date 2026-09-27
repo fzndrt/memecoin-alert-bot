@@ -1,14 +1,13 @@
 """
-data_sources/pumpportal_stream.py - Sub-Second Early Detection Engine
-Menggantikan polling DexScreener yang lambat dengan WebSocket langsung dari PumpPortal/Solana
-Menangkap koin saat bonding curve masih 20% - 60% ($15K - $40K MC) seperti kasus $WODL
+pumpportal_stream.py - Sub-Second Early Detection Engine (Solana / Pump.fun)
 """
-
 import json
 import asyncio
+import logging
 import websockets
 from typing import Callable
 
+logger = logging.getLogger("memecoin-alert-bot")
 PUMPPORTAL_WS_URL = "wss://pumpportal.fun/api/data"
 
 class PumpPortalStreamer:
@@ -18,26 +17,28 @@ class PumpPortalStreamer:
 
     async def start(self):
         self.is_running = True
-        print("[PumpAlpha] Menghubungkan ke WebSocket PumpPortal...")
+        logger.info("[PumpAlpha] Menghubungkan ke WebSocket PumpPortal...")
         
         while self.is_running:
             try:
-                async with websockets.connect(PUMPPORTAL_WS_URL) as ws:
-                    print("[PumpAlpha] Terhubung ke real-time stream Solana/Pump.fun!")
+                async with websockets.connect(PUMPPORTAL_WS_URL, ping_interval=20, ping_timeout=20) as ws:
+                    logger.info("[PumpAlpha] TERHUBUNG KE REAL-TIME STREAM SOLANA / PUMP.FUN!")
                     
-                    # Berlangganan koin baru dan transaksi whale > 1 SOL
-                    payload = {
-                        "method": "subscribeNewToken"
-                    }
-                    await ws.send(json.dumps(payload))
+                    # 1. Langganan koin baru diluncurkan
+                    await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                    logger.info("[PumpAlpha] Berlangganan feed token baru aktif.")
+
+                    # 2. Langganan transaksi trade langsung di bonding curve
+                    await ws.send(json.dumps({"method": "subscribeAccountTrade", "keys": ["all"]}))
                     
                     while self.is_running:
                         msg = await ws.recv()
                         data = json.loads(msg)
-                        await self.callback(data)
-                        
+                        if self.callback:
+                            await self.callback(data)
+                            
             except Exception as e:
-                print(f"[PumpAlpha] Koneksi terputus: {e}. Reconnecting dalam 3 detik...")
+                logger.warning(f"[PumpAlpha] Koneksi WebSocket terputus: {e}. Reconnecting dalam 3 detik...")
                 await asyncio.sleep(3)
 
     def stop(self):
