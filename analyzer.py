@@ -1,111 +1,118 @@
 """
-Logika inti: mengumpulkan kandidat token, menghitung metrik akumulasi &
-narasi, menyaring berdasarkan kriteria, dan mengembalikan daftar token
-yang layak dialert -- diurutkan dari narasi TERKUAT.
+analyzer.py - Mesin Analisis Akumulasi & Sentimen PumpAlpha v2.0
+Menggantikan analisis volume lama dengan Cumulative Volume Delta (CVD),
+Rasio Pembeli Unik, dan Audit Dev Supply < 2.5%
 """
-import time
-from typing import List, Dict, Any
 
-import config
-import narrative
-from data_sources import dexscreener
-from security import goplus
+import math
+from typing import Dict, Any, Tuple
 
+class MemecoinAccumulationAnalyzer:
+    def __init__(self, 
+                 min_cvd_ratio: float = 30.0,
+                 min_buy_sell_ratio: float = 2.0,
+                 max_dev_holding: float = 3.0,
+                 max_top10_holding: float = 25.0):
+        self.min_cvd_ratio = min_cvd_ratio
+        self.min_buy_sell_ratio = min_buy_sell_ratio
+        self.max_dev_holding = max_dev_holding
+        self.max_top10_holding = max_top10_holding
 
-def _collect_candidate_pairs() -> List[Dict[str, Any]]:
-    """Kumpulkan pair kandidat dari token yang baru di-boost & profil baru
-    di DexScreener -- dua sinyal ini sering muncul saat sebuah narasi/koin
-    mulai ramai dibicarakan sebelum harga bergerak besar."""
-    seen_keys = set()
-    candidates: List[Dict[str, Any]] = []
+    def calculate_cvd_delta(self, txns_m5: Dict[str, int], vol_m5: float) -> Tuple[float, float]:
+        """
+        Menghitung Cumulative Volume Delta (CVD) dari transaksi 5 menit terakhir.
+        CVD Ratio = (Buys - Sells) / Total Txns * 100
+        """
+        buys = txns_m5.get("buys", 0)
+        sells = txns_m5.get("sells", 0)
+        total = buys + sells
 
-    boosted = dexscreener.get_latest_boosted_tokens() + dexscreener.get_top_boosted_tokens()
-    profiles = dexscreener.get_latest_token_profiles()
+        if total == 0:
+            return 0.0, 0.0
 
-    for item in boosted + profiles:
-        chain_id = (item.get("chainId") or "").lower()
-        address = item.get("tokenAddress")
-        if not address or chain_id not in config.CHAINS:
-            continue
-        key = f"{chain_id}:{address.lower()}"
-        if key in seen_keys:
-            continue
-        seen_keys.add(key)
+        buy_ratio = buys / total
+        cvd_ratio = (buy_ratio - (1.0 - buy_ratio)) * 100.0
+        cvd_usd = vol_m5 * (buy_ratio - (1.0 - buy_ratio))
+        return round(cvd_usd, 2), round(cvd_ratio, 1)
 
-        pairs = dexscreener.get_pairs_for_token(chain_id, address)
-        for pair in pairs:
-            pair["_profile_item"] = item  # dipakai narrative.py utk skor deskripsi/link
-            candidates.append(pair)
+    def detect_wash_trading(self, txns_m5: Dict[str, int], vol_m5: float, unique_buyers: int) -> bool:
+        """
+        Deteksi Wash Trading: Jika transaksi sangat tinggi tapi rasio beli:jual persis 50:50,
+        atau unique buyers sangat rendah dibandingkan total transaksi.
+        """
+        buys = txns_m5.get("buys", 0)
+        sells = txns_m5.get("sells", 0)
+        total = buys + sells
 
-    return candidates
-
-
-def _passes_filters(pair: Dict[str, Any]) -> bool:
-    liquidity = (pair.get("liquidity") or {}).get("usd") or 0
-    volume = pair.get("volume") or {}
-    price_change = pair.get("priceChange") or {}
-    txns_h1 = (pair.get("txns") or {}).get("h1") or {}
-
-    vol_h1 = volume.get("h1") or 0
-    vol_h24 = volume.get("h24") or 0
-    avg_vol_per_hour_24h = vol_h24 / 24 if vol_h24 else 0
-
-    change_h1 = price_change.get("h1") or 0
-    change_h24 = price_change.get("h24") or 0
-
-    buys_h1 = txns_h1.get("buys") or 0
-    sells_h1 = txns_h1.get("sells") or 0
-    buy_sell_ratio = (buys_h1 / sells_h1) if sells_h1 else (float("inf") if buys_h1 else 0)
-
-    if liquidity < config.MIN_LIQUIDITY_USD:
-        return False
-    if vol_h1 < config.MIN_VOLUME_H1_USD:
-        return False
-    if avg_vol_per_hour_24h <= 0 or (vol_h1 / avg_vol_per_hour_24h) < config.MIN_VOLUME_SPIKE_RATIO:
-        return False
-    if not (config.MIN_PRICE_CHANGE_H1 <= change_h1 <= config.MAX_PRICE_CHANGE_H1):
-        return False
-    if change_h24 > config.MAX_PRICE_CHANGE_H24:
-        return False  # kemungkinan sudah pump duluan, bukan lagi fase akumulasi
-    if buy_sell_ratio < config.MIN_BUY_SELL_RATIO_H1:
+        if total > 50:
+            ratio = buys / max(1, sells)
+            # Jika rasio berada di antara 0.95 dan 1.05 pada volume besar -> indikasi wash bot
+            if 0.95 <= ratio <= 1.05 and unique_buyers < (total * 0.2):
+                return True
         return False
 
-    return True
+    def evaluate_token(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Evaluasi multi-faktor untuk sinyal Early Snipe (9000% Gem Filter)
+        """
+        txns_m5 = token_data.get("txns", {}).get("m5", {"buys": 0, "sells": 0})
+        vol_m5 = token_data.get("volume", {}).get("m5", 0.0)
+        market_cap = token_data.get("marketCap", token_data.get("fdv", 0.0))
+        dev_holding = token_data.get("devHoldingPercent", 0.0)
+        top10_holding = token_data.get("top10HoldersPercent", 0.0)
+        unique_buyers = token_data.get("uniqueBuyersCount", txns_m5.get("buys", 0))
 
+        # 1. Hitung CVD
+        cvd_usd, cvd_ratio = self.calculate_cvd_delta(txns_m5, vol_m5)
 
-def find_accumulation_candidates() -> List[Dict[str, Any]]:
-    """Kandidat yang lolos filter market dasar + keamanan + skor narasi
-    minimum, diurutkan dari yang narasinya PALING KUAT terlebih dahulu."""
-    results = []
-    candidates = _collect_candidate_pairs()
+        # 2. Hitung rasio beli / jual
+        buys = txns_m5.get("buys", 0)
+        sells = max(1, txns_m5.get("sells", 1))
+        buy_sell_ratio = round(buys / sells, 2)
 
-    for pair in candidates:
-        if not _passes_filters(pair):
-            continue
+        # 3. Cek wash trading
+        is_wash = self.detect_wash_trading(txns_m5, vol_m5, unique_buyers)
 
-        chain_id = pair.get("chainId", "")
-        base_token = pair.get("baseToken") or {}
-        address = base_token.get("address", "")
+        # 4. Kriteria Kelulusan Sinyal Akumulasi
+        reasons = []
+        is_passed = True
 
-        security_info = None
-        if config.ENABLE_SECURITY_CHECK:
-            security_info = goplus.check_token_security(chain_id, address)
-            if not goplus.is_token_safe_enough(security_info, config.MAX_BUY_TAX_PCT, config.MAX_SELL_TAX_PCT):
-                continue
+        if cvd_ratio < self.min_cvd_ratio:
+            is_passed = False
+            reasons.append(f"CVD Ratio {cvd_ratio}% di bawah minimal +{self.min_cvd_ratio}%")
 
-        # Evaluasi narasi/identitas proyek -- ini penentu utama apakah
-        # token cukup layak dialert, bukan sekadar lolos filter volume.
-        narrative_result = narrative.evaluate(chain_id, address, pair.get("_profile_item"))
-        time.sleep(config.CG_REQUEST_DELAY_SECONDS)  # jaga rate limit CoinGecko
+        if buy_sell_ratio < self.min_buy_sell_ratio:
+            is_passed = False
+            reasons.append(f"Rasio Beli:Jual {buy_sell_ratio}x di bawah minimal {self.min_buy_sell_ratio}x")
 
-        if narrative_result["score"] < config.MIN_NARRATIVE_SCORE:
-            continue
+        if dev_holding > self.max_dev_holding:
+            is_passed = False
+            reasons.append(f"Dev holding {dev_holding}% terlalu beresiko (max {self.max_dev_holding}%)")
 
-        pair["_security_summary"] = goplus.summarize_security(security_info)
-        pair["_narrative"] = narrative_result
-        results.append(pair)
+        if top10_holding > self.max_top10_holding:
+            is_passed = False
+            reasons.append(f"Top 10 memegang {top10_holding}% (konsentrasi whale berbahaya)")
 
-    # Urutkan: narasi terkuat di paling atas -> jadi fokus utama saat
-    # membaca alert yang masuk berurutan ke Telegram.
-    results.sort(key=lambda p: p["_narrative"]["score"], reverse=True)
-    return results
+        if is_wash:
+            is_passed = False
+            reasons.append("Pola wash-trading terdeteksi")
+
+        # Skor 0 - 100
+        score = 50
+        if cvd_ratio >= 40: score += 20
+        if buy_sell_ratio >= 2.5: score += 15
+        if dev_holding <= 2.0: score += 15
+        if is_wash: score -= 40
+
+        score = max(5, min(99, score))
+
+        return {
+            "is_approved": is_passed,
+            "score": score,
+            "cvd_usd": cvd_usd,
+            "cvd_ratio": cvd_ratio,
+            "buy_sell_ratio": buy_sell_ratio,
+            "is_wash_trading": is_wash,
+            "reasons": reasons,
+            "action": "SNIPE_ENTRY" if is_passed and score >= 75 else "SKIP"
+        }
