@@ -129,26 +129,52 @@ def health():
         "cached_tokens": len(token_cache)
     })
 
-if __name__ == "__main__":
-    # Jalankan WebSocket di background thread
-    ws_thread = threading.Thread(target=run_websocket_loop, daemon=True)
-    ws_thread.start()
-    logger.info("WebSocket PumpPortal telah di-start di background thread!")
+@app.route("/test-alert")
+def test_alert():
+    """Buka URL ini di browser untuk tes tembak alert langsung ke Telegram!"""
+    if not bot or not config.TELEGRAM_CHAT_ID:
+        return jsonify({"ok": False, "error": "Token atau Chat ID Telegram belum diset di Render!"})
+    
+    dummy_eval = {
+        "score": 96,
+        "cvd_ratio": 84.5,
+        "buy_sell_ratio": 4.2
+    }
+    
+    pesan = format_telegram_alert(
+        token_name="Effective Accelerationism",
+        symbol="e/acc",
+        mint="CbcyNo7m1amFWqEQm2m4PLv1UNvpcL3C1Ujm6AkzpKoU",
+        eval_result=dummy_eval,
+        mc=22500
+    )
+    
+    try:
+        bot.send_message(config.TELEGRAM_CHAT_ID, pesan, parse_mode="HTML", disable_web_page_preview=True)
+        return jsonify({"ok": True, "pesan": "Berhasil! Notifikasi alert koin telah dikirim ke Telegram Anda."})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
 
-    # Port untuk Render (Prioritaskan os.getenv PORT dari Render)
-    port = int(os.environ.get("PORT", getattr(config, "PORT", 10000)))
-    app.run(host="0.0.0.0", port=port)
 if __name__ == "__main__":
+    # 1. Kirim pesan konfirmasi ke Telegram SEBELUM server Flask memblokir
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-        logger.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID belum diset -- alert tidak akan terkirim.")
+        logger.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID belum diset di Render Environment!")
     else:
-        # Kirim notifikasi konfirmasi ke Telegram Anda saat Render berhasil online
         try:
             bot.send_message(
                 config.TELEGRAM_CHAT_ID,
                 "🚀 <b>PUMPALPHA BOT ONLINE DI RENDER!</b>\nRadar Solana/Pump.fun aktif memantau koin gem.",
                 parse_mode="HTML"
             )
-            logger.info("Notifikasi startup sukses dikirim ke Telegram!")
+            logger.info("Notifikasi startup sukses dikirim ke Telegram Febri!")
         except Exception as e:
-            logger.error(f"Gagal kirim startup: {e}")
+            logger.error(f"Gagal kirim pesan pembuka: {e}")
+
+    # 2. Jalankan WebSocket di background thread
+    ws_thread = threading.Thread(target=run_websocket_loop, daemon=True)
+    ws_thread.start()
+    logger.info("WebSocket PumpPortal telah di-start di background thread!")
+
+    # 3. Jalankan Flask server
+    port = int(os.environ.get("PORT", getattr(config, "PORT", 10000)))
+    app.run(host="0.0.0.0", port=port)
