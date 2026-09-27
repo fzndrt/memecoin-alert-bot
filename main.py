@@ -1,8 +1,9 @@
 """
-main.py - Entry Point Terintegrasi (Flask Health Check + PumpPortal WebSocket + APScheduler)
-Sudah langsung disesuaikan dengan arsitektur repo: https://github.com/fzndrt/memecoin-alert-bot
+main.py - Entry Point Terintegrasi (Flask Health Check + PumpPortal WebSocket)
+Repo: https://github.com/fzndrt/memecoin-alert-bot
 """
 
+import os
 import asyncio
 import threading
 import logging
@@ -19,23 +20,21 @@ logger = logging.getLogger("memecoin-alert-bot")
 app = Flask(__name__)
 bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
 
-# Inisialisasi Analyzer Akumulasi PumpAlpha
+# Inisialisasi Mesin Analisis Akumulasi PumpAlpha
 analyzer = MemecoinAccumulationAnalyzer(
-    min_cvd_ratio=30.0,
-    min_buy_sell_ratio=2.0,
-    max_dev_holding=2.5,
+    min_cvd_ratio=25.0,
+    min_buy_sell_ratio=1.8,
+    max_dev_holding=3.0,
     max_top10_holding=25.0
 )
 
-# Cache memori token
 token_cache = {}
-_last_run_summary = {"status": "WebSocket aktif mendengarkan Solana/Pump.fun"}
+stats = {"events_received": 0, "gems_found": 0}
 
 def format_telegram_alert(token_name: str, symbol: str, mint: str, eval_result: dict, mc: float) -> str:
     score = eval_result.get("score", 0)
     cvd_ratio = eval_result.get("cvd_ratio", 0.0)
     buy_ratio = eval_result.get("buy_sell_ratio", 1.0)
-    
     status_emoji = "🟢 ULTRA EARLY GEM" if score >= 85 else "🚀 STRONG ACCUMULATION"
     
     msg = f"""
@@ -63,20 +62,18 @@ def format_telegram_alert(token_name: str, symbol: str, mint: str, eval_result: 
     return msg.strip()
 
 async def on_token_event(data: dict):
-    """
-    Callback realtime dari pumpportal_stream.py setiap ada trade atau token baru!
-    """
+    stats["events_received"] += 1
     mint = data.get("mint")
-    if not mint:
-        return
-
-    # Hindari spam alert untuk token yang sama
-    if state.already_alerted(mint):
+    if not mint or state.already_alerted(mint):
         return
 
     name = data.get("name", "Unknown Token")
     symbol = data.get("symbol", "PUMP")
-    mc = data.get("marketCapSol", 0) * 160  # Estimasi kurs SOL ~$160
+    mc = data.get("marketCapSol", 0) * 160
+
+    # Log heartbeat setiap 25 event transaksi agar Anda tahu bot aktif bekerja
+    if stats["events_received"] % 25 == 0:
+        logger.info(f"[Radar Aktif] Memindai aliran transaksi Solana... Total event: {stats['events_received']}, Token dipantau: {len(token_cache)}")
 
     if mint not in token_cache:
         token_cache[mint] = {
@@ -89,7 +86,6 @@ async def on_token_event(data: dict):
             "marketCap": mc
         }
 
-    # Hitung akumulasi beli vs jual
     tx_type = data.get("txType", "buy")
     if tx_type == "buy":
         token_cache[mint]["txns"]["m5"]["buys"] += 1
@@ -98,12 +94,12 @@ async def on_token_event(data: dict):
         
     token_cache[mint]["volume"]["m5"] += data.get("solAmount", 0) * 160
 
-    # Evaluasi dengan mesin analyzer
+    # Evaluasi koin
     result = analyzer.evaluate_token(token_cache[mint])
 
-    if result.get("is_approved") and result.get("score", 0) >= 80:
-        score_val = result['score']
-        logger.info(f"🔥 GEM TERDETEKSI: {name} (${symbol}) | Skor: {score_val}")
+    if result.get("is_approved") and result.get("score", 0) >= 75:
+        stats["gems_found"] += 1
+        logger.info(f"🔥 GEM TERDETEKSI: {name} (${symbol}) | Skor: {result['score']}")
         if bot and config.TELEGRAM_CHAT_ID:
             text = format_telegram_alert(name, symbol, mint, result, mc)
             try:
@@ -118,7 +114,6 @@ async def on_token_event(data: dict):
                 logger.error(f"Gagal kirim Telegram: {e}")
 
 def run_websocket_loop():
-    """Jalankan WebSocket loop di background thread terpisah"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     streamer = PumpPortalStreamer(on_token_trade_callback=on_token_event)
@@ -126,23 +121,20 @@ def run_websocket_loop():
 
 @app.route("/")
 def health():
-    """Endpoint untuk UptimeRobot / health check Render."""
     return jsonify({
         "service": "memecoin-alert-bot", 
         "ok": True, 
         "websocket": "Running",
+        "events_received": stats["events_received"],
         "cached_tokens": len(token_cache)
     })
 
 if __name__ == "__main__":
-    if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
-        logger.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID belum diset -- alert tidak akan terkirim.")
-    
-    # 1. Jalankan WebSocket PumpPortal di thread background
+    # Jalankan WebSocket di background thread
     ws_thread = threading.Thread(target=run_websocket_loop, daemon=True)
     ws_thread.start()
-    logger.info("WebSocket PumpPortal aktif di background!")
+    logger.info("WebSocket PumpPortal telah di-start di background thread!")
 
-    # 2. Jalankan Flask server (agar Render/UptimeRobot tetap hidup)
-    port = getattr(config, "PORT", 5000)
+    # Port untuk Render (Prioritaskan os.getenv PORT dari Render)
+    port = int(os.environ.get("PORT", getattr(config, "PORT", 10000)))
     app.run(host="0.0.0.0", port=port)
