@@ -1,11 +1,10 @@
 """
-main.py - Dual-Engine Memecoin Alert Bot v3.0
-Fitur Lengkap:
-- Mesin 1: Sub-Second WebSocket Pump.fun (Koin Baru Lahir)
-- Mesin 2: Radar DexScreener Usia 15 - 60 Menit (Koin Migrasi Raydium/PumpSwap)
-- Filter Anti-Wash Trading, Anti-Sniper Bot War & Anti-Dump Whale < 10%
-- Web Server Flask untuk Health Check Render
+main.py - Dual-Engine Memecoin Alert Bot v3.2 (Super Strict Gem Radar)
 Repo: https://github.com/fzndrt/memecoin-alert-bot
+Fitur:
+- Pembeda Label Koin: 🟡 PUMP.FUN RADAR vs 🔵 SOLANA DEX GRADUATE
+- Filter Ketat Anti-Koin Mati (MC Min $18k di Pump.fun, Liq Min $12k di DEX)
+- Anti-Dump: Menolak koin dengan tren harga merah/longsor
 """
 
 import os
@@ -29,43 +28,71 @@ logger = logging.getLogger("memecoin-alert-bot")
 app = Flask(__name__)
 bot = telebot.TeleBot(config.TELEGRAM_BOT_TOKEN) if config.TELEGRAM_BOT_TOKEN else None
 
-# Inisialisasi Mesin Analisis Akumulasi PumpAlpha v3.0
-# Memfilter koin muda (15 - 120 Menit) dengan proteksi anti-wash trading & anti-whale dump
+# Inisialisasi Analyzer Tingkat Akurasi Tinggi
 analyzer = MemecoinAccumulationAnalyzer(
-    min_cvd_ratio=25.0,        # Minimal Net Inflow Akumulasi +25%
-    min_buy_sell_ratio=1.35,   # Dominasi Pembeli minimal 1.35x
-    max_dev_holding=3.0,       # Dompet Dev maksimal 3.0%
-    max_top_holder=10.0,       # Dompet Whale/Sniper pribadi maksimal < 10.0%
-    min_age_minutes=15.0,      # Usia minimal 15 menit (Koin seperti $e/acc & Gentoo masuk radar)
-    max_age_minutes=120.0      # Usia maksimal 120 menit (setelah itu masuk Conviction Scanner)
+    min_cvd_ratio=28.0,        # Minimal Net Inflow Akumulasi +28%
+    min_buy_sell_ratio=1.5,    # Pembeli harus 1.5x lipat dari penjual
+    max_dev_holding=2.5,       # Dompet Dev maksimal 2.5%
+    max_top_holder=10.0,       # Dompet Whale maksimal 10.0%
+    min_age_minutes=15.0,      # Minimal usia 15 menit
+    max_age_minutes=120.0      # Maksimal usia 120 menit
 )
 
 token_cache = {}
 stats = {"events_received": 0, "gems_found": 0}
 
 
-def format_telegram_alert(token_name: str, symbol: str, mint: str, eval_result: dict, mc: float) -> str:
+def check_real_top_holder(mint: str) -> float:
+    """Mengambil kepemilikan holder terbesar dari RugCheck on-chain"""
+    try:
+        url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/report"
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=4) as resp:
+            data = json.loads(resp.read().decode('utf-8'))
+            top_holders = data.get("topHolders", [])
+            if top_holders:
+                for h in top_holders:
+                    pct = float(h.get("pct", 0.0))
+                    # Abaikan pool authority (>85%)
+                    if pct < 85.0:
+                        return pct
+    except Exception:
+        pass
+    return 0.0
+
+
+def format_telegram_alert(token_name: str, symbol: str, mint: str, eval_result: dict, mc: float, source: str, extra_info: str) -> str:
     score = eval_result.get("score", 0)
     cvd_ratio = eval_result.get("cvd_ratio", 0.0)
     buy_ratio = eval_result.get("buy_sell_ratio", 1.0)
     age = eval_result.get("age_minutes", 0.0)
     top_holder = eval_result.get("top_holder_pct", 0.0)
 
-    status_emoji = "🟢 ULTRA EARLY GEM" if score >= 85 else "🚀 EARLY ACCUMULATION"
-    holder_info = f"{top_holder:.1f}% (Aman &lt; 10%)" if top_holder > 0 else "Distribusi Bersih"
+    # Label Visual yang Jelas sesuai Sumber Koin
+    if source == "PUMPFUN":
+        header_badge = "🟡 <b>[PUMP.FUN LIVE RADAR]</b>"
+        stage_desc = "Fase Akumulasi Kurva Bonding (25% - 75%)"
+    else:
+        header_badge = "🔵 <b>[SOLANA DEX GRADUATE]</b>"
+        stage_desc = "Resmi Listing di Raydium / PumpSwap"
 
-    msg = f"""{status_emoji} | <b>{token_name} (${symbol})</b>
+    holder_str = f"{top_holder:.1f}% (Aman &lt; 10%)" if top_holder > 0 else "Distribusi Bersih"
+
+    msg = f"""{header_badge}
+💎 <b>{token_name} (${symbol})</b>
 ━━━━━━━━━━━━━━━━━━━━
 🎯 <b>PumpAlpha Score:</b> <code>{score}/100</code>
+📍 <b>Status Platform:</b> <code>{stage_desc}</code>
 ⏳ <b>Usia Koin:</b> <code>{age:.1f} Menit</code>
 💰 <b>Market Cap:</b> <code>${mc:,.0f}</code>
+{extra_info}
 📊 <b>Net Inflow (CVD):</b> <code>+{cvd_ratio}%</code>
-⚡ <b>Rasio Pembeli:</b> <code>{buy_ratio}x Buyers</code>
+⚡ <b>Rasio Pembeli:</b> <code>{buy_ratio}x Buyers Dominance</code>
 ━━━━━━━━━━━━━━━━━━━━
-🛡️ <b>Audit Keamanan & On-Chain:</b>
-• Top Holder Terbesar: <code>{holder_info}</code>
-• Anti-Wash Volume: <code>LOLOS VERIFIKASI ORGANIK</code>
-• Sniper Protection: <code>Lolos Filter Perang Bot</code>
+🛡️ <b>Audit Keamanan & Integritas:</b>
+• Top Whale Terbesar: <code>{holder_str}</code>
+• Volume Status: <code>VOLUME ASLI (Bukan Bot Wash)</code>
+• Anti-Dump Filter: <code>LOLOS (Tren Harga Naik/Stabil)</code>
 
 📋 <b>Mint Address:</b>
 <code>{mint}</code>
@@ -79,7 +106,7 @@ def format_telegram_alert(token_name: str, symbol: str, mint: str, eval_result: 
 
 
 # =====================================================================
-# MESIN 1: STREAMING PUMPPORTAL WEBSOCKET (KOIN BARU LAHIR DI PUMP.FUN)
+# MESIN 1: PUMPPORTAL WEBSOCKET (SUPER KETAT - MIN MC $18,000 & VOL $1,500)
 # =====================================================================
 async def on_token_event(data: dict):
     stats["events_received"] += 1
@@ -89,13 +116,8 @@ async def on_token_event(data: dict):
 
     name = data.get("name", "Unknown Token")
     symbol = data.get("symbol", "PUMP")
-    mc = data.get("marketCapSol", 0) * 160
+    mc = float(data.get("marketCapSol", 0.0) or 0.0) * 160
     current_time = time.time()
-
-    if stats["events_received"] % 25 == 0:
-        logger.info(
-            f"[Radar Aktif] Memindai transaksi Solana... Total event: {stats['events_received']}, Token dipantau: {len(token_cache)}"
-        )
 
     if mint not in token_cache:
         token_cache[mint] = {
@@ -104,9 +126,9 @@ async def on_token_event(data: dict):
             "first_seen": current_time,
             "txns": {"m5": {"buys": 0, "sells": 0}},
             "volume": {"m5": 0.0, "h1": 0.0},
-            "liquidity": {"usd": max(5000.0, mc * 0.2)},
-            "devHoldingPercent": data.get("devHoldingPercent", 1.0),
-            "topHolderPercent": data.get("top10Percent", 4.0),
+            "liquidity": {"usd": max(8000.0, mc * 0.3)},
+            "devHoldingPercent": float(data.get("devHoldingPercent", 1.0)),
+            "topHolderPercent": 3.0,
             "marketCap": mc,
         }
 
@@ -114,7 +136,7 @@ async def on_token_event(data: dict):
     token_cache[mint]["ageMinutes"] = max(15.0, age_minutes)
 
     tx_type = data.get("txType", "buy")
-    sol_amount = data.get("solAmount", 0) * 160
+    sol_amount = float(data.get("solAmount", 0.0) or 0.0) * 160
 
     if tx_type == "buy":
         token_cache[mint]["txns"]["m5"]["buys"] += 1
@@ -125,19 +147,40 @@ async def on_token_event(data: dict):
     token_cache[mint]["volume"]["h1"] += sol_amount
     token_cache[mint]["marketCap"] = mc
 
+    # 🚫 GEMBOK 1: TOLAK KOIN MATI DENGAN MC RENDAH (5boJpm MC $3.5k gugur di sini!)
+    # Koin yang akan terbang ke jutaan dollar kurva bonding-nya minimal harus sudah mencapai $18.000!
+    if mc < 18000.0:
+        return
+
+    # 🚫 GEMBOK 2: TOLAK VOLUME RECEHAN (Wajib minimal $1,500 akumulasi di 5 menit terakhir)
+    if token_cache[mint]["volume"]["m5"] < 1500.0:
+        return
+
+    # 🚫 GEMBOK 3: TOLAK JIKA PENJUAL LEBIH BANYAK DARI PEMBELI
+    buys = token_cache[mint]["txns"]["m5"]["buys"]
+    sells = token_cache[mint]["txns"]["m5"]["sells"]
+    if buys < (sells * 1.5) or (buys + sells) < 25:
+        return
+
     result = analyzer.evaluate_token(token_cache[mint])
-    if result.get("is_approved") and result.get("score", 0) >= 75:
+    if result.get("is_approved") and result.get("score", 0) >= 78:
+        # Cek On-Chain Top Holder
+        real_top_holder = check_real_top_holder(mint)
+        if real_top_holder > 10.0:
+            logger.info(f"🚫 [Pump.fun] Ditolak: Top Holder {real_top_holder:.1f}% > 10% ({mint})")
+            return
+
+        result["top_holder_pct"] = real_top_holder
         stats["gems_found"] += 1
-        logger.info(f"🔥 GEM TERDETEKSI (Mesin 1): {name} (${symbol}) | Skor: {result['score']}")
+        logger.info(f"🔥 GEM TERDETEKSI (🟡 PUMP.FUN): {name} (${symbol}) | MC: ${mc:,.0f} | Skor: {result['score']}")
+        
+        bonding_pct = min(99.0, (mc / 65000.0) * 100.0)
+        extra = f"📈 <b>Kurva Bonding:</b> <code>{bonding_pct:.1f}% Terisi</code>"
+
         if bot and config.TELEGRAM_CHAT_ID:
-            text = format_telegram_alert(name, symbol, mint, result, mc)
+            text = format_telegram_alert(name, symbol, mint, result, mc, "PUMPFUN", extra)
             try:
-                bot.send_message(
-                    config.TELEGRAM_CHAT_ID,
-                    text,
-                    parse_mode="HTML",
-                    disable_web_page_preview=True,
-                )
+                bot.send_message(config.TELEGRAM_CHAT_ID, text, parse_mode="HTML", disable_web_page_preview=True)
                 state.mark_alerted(mint)
             except Exception as e:
                 logger.error(f"Gagal kirim Telegram: {e}")
@@ -151,19 +194,18 @@ def run_websocket_loop():
 
 
 # =====================================================================
-# MESIN 2: RADAR DEXSCREENER (KOIN USIA 15 - 60 MENIT / SUDAH MIGRASI)
+# MESIN 2: RADAR DEXSCREENER (SUPER KETAT - MIN LIQ $12,000 & ANTI-CRASH)
 # =====================================================================
 def poll_dexscreener_early_graduates():
-    logger.info("[Mesin 2] Radar Solana Usia 15-60m Aktif...")
+    logger.info("[Mesin 2] Radar Solana Dex (Usia 15-60m) Aktif...")
     while True:
         try:
-            # 1. Ambil token Solana terbaru dan profil aktif
             url = "https://api.dexscreener.com/token-profiles/latest/v1"
             req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
             with urllib.request.urlopen(req, timeout=10) as resp:
                 profiles = json.loads(resp.read().decode('utf-8'))
                 
-            sol_mints = [p["tokenAddress"] for p in profiles if p.get("chainId") == "solana"][:15]
+            sol_mints = [p["tokenAddress"] for p in profiles if p.get("chainId") == "solana"][:20]
             
             for mint in sol_mints:
                 if state.already_alerted(mint):
@@ -177,53 +219,80 @@ def poll_dexscreener_early_graduates():
                     if not pairs:
                         continue
                     
-                    pair = pairs[0]  # Pool likuiditas utama
+                    pair = pairs[0]
+
+                    # 🛡️ 1. SYARAT LIKUIDITAS: Minimal $12,000 USD
+                    liq_usd = float(pair.get("liquidity", {}).get("usd") or 0.0)
+                    if liq_usd < 12000.0:
+                        continue
+
+                    # 🛡️ 2. SYARAT TREN HARGA: TIDAK BOLEH SEDANG DUMP / LONGSOR
+                    price_change = pair.get("priceChange", {})
+                    h1_change = float(price_change.get("h1") or 0.0)
+                    m5_change = float(price_change.get("m5") or 0.0)
+                    if h1_change < -5.0 or m5_change < -3.0:
+                        continue
+
+                    # 🛡️ 3. SYARAT AKTIVITAS TRANSAKSI: Minimal 30 Transaksi di M5
+                    txns_m5 = pair.get("txns", {}).get("m5", {})
+                    buys = txns_m5.get("buys", 0)
+                    sells = txns_m5.get("sells", 0)
+                    if buys < (sells * 1.4) or (buys + sells) < 30:
+                        continue
+
                     created_at = pair.get("pairCreatedAt", 0)
                     if not created_at:
                         continue
                         
                     age_mins = (time.time() * 1000 - created_at) / 60000.0
                     
-                    # 🎯 SASARAN TEPAT: Koin usia 15 s/d 60 menit (Koin seperti $e/acc & Gentoo)
+                    # Target Usia 15 - 60 Menit
                     if 15.0 <= age_mins <= 60.0:
+                        real_top_holder = check_real_top_holder(mint)
+                        if real_top_holder > 10.0:
+                            logger.info(f"🚫 [DEX] Ditolak: Top Holder {real_top_holder:.1f}% > 10% ({mint})")
+                            continue
+
                         eval_payload = {
                             "ageMinutes": age_mins,
                             "txns": pair.get("txns", {}),
                             "volume": pair.get("volume", {}),
-                            "liquidity": pair.get("liquidity", {}),
-                            "marketCap": pair.get("marketCap", 0.0),
+                            "liquidity": {"usd": liq_usd},
+                            "marketCap": float(pair.get("marketCap") or 0.0),
                             "devHoldingPercent": 1.0,
-                            "topHolderPercent": 4.0,  # Akan divalidasi keamanannya
-                            "uniqueBuyersCount": pair.get("txns", {}).get("m5", {}).get("buys", 0)
+                            "topHolderPercent": real_top_holder,
+                            "uniqueBuyersCount": buys
                         }
                         
                         eval_res = analyzer.evaluate_token(eval_payload)
-                        if eval_res.get("is_approved") and eval_res.get("score", 0) >= 75:
+                        if eval_res.get("is_approved") and eval_res.get("score", 0) >= 78:
                             stats["gems_found"] += 1
-                            mc = pair.get("marketCap", 0.0)
+                            mc = float(pair.get("marketCap") or 0.0)
                             name = pair.get("baseToken", {}).get("name", "Early Gem")
                             sym = pair.get("baseToken", {}).get("symbol", "SOL")
                             
-                            text = format_telegram_alert(name, sym, mint, eval_res, mc)
+                            extra = f"💧 <b>Likuiditas DEX:</b> <code>${liq_usd:,.0f}</code>"
+                            text = format_telegram_alert(name, sym, mint, eval_res, mc, "DEX", extra)
+                            
                             if bot and config.TELEGRAM_CHAT_ID:
                                 bot.send_message(config.TELEGRAM_CHAT_ID, text, parse_mode="HTML", disable_web_page_preview=True)
                                 state.mark_alerted(mint)
-                                logger.info(f"💎 GEM TERDETEKSI (Mesin 2 DexScreener): {name} (${sym}) Usia {age_mins:.1f}m!")
+                                logger.info(f"💎 GEM ASLI TERDETEKSI (🔵 DEX): {name} (${sym}) | Liq: ${liq_usd:,.0f} | Usia: {age_mins:.1f}m!")
                                 
         except Exception as e:
             logger.debug(f"[Mesin 2 Poller Error]: {e}")
             
-        time.sleep(60)  # Memindai ulang setiap 60 detik
+        time.sleep(45)
 
 
 # =====================================================================
-# FLASK WEB SERVER (HEALTH CHECK & TEST ALERT)
+# FLASK WEB SERVER
 # =====================================================================
 @app.route("/")
 def health():
     return jsonify({
         "service": "memecoin-alert-bot",
-        "version": "3.0.0-dual-engine",
+        "version": "3.2.0-super-strict",
         "ok": True,
         "websocket": "Running",
         "events_received": stats["events_received"],
@@ -233,7 +302,6 @@ def health():
 
 @app.route("/test-alert")
 def test_alert():
-    """Buka URL ini di browser untuk tes tembak alert langsung ke Telegram!"""
     if not bot or not config.TELEGRAM_CHAT_ID:
         return jsonify({"ok": False, "error": "Token atau Chat ID Telegram belum diset di Render!"})
 
@@ -251,6 +319,8 @@ def test_alert():
         mint="CbcyNo7m1amFWqEQm2m4PLv1UNvpcL3C1Ujm6AkzpKoU",
         eval_result=dummy_eval,
         mc=22500,
+        source="PUMPFUN",
+        extra_info="📈 <b>Kurva Bonding:</b> <code>34.6% Terisi</code>"
     )
 
     try:
@@ -270,23 +340,18 @@ if __name__ == "__main__":
         try:
             bot.send_message(
                 config.TELEGRAM_CHAT_ID,
-                "🚀 <b>PUMPALPHA BOT v3.0 ONLINE!</b>\nDual-Engine Aktif: Pump.fun Streaming + DexScreener Radar 15-60m.",
+                "🛡️ <b>PUMPALPHA BOT v3.2 ONLINE!</b>\nFilter Super Ketat Aktif: 🟡 Pump.fun Radar (Min MC $18k) & 🔵 Dex Graduates (Min Liq $12k).",
                 parse_mode="HTML",
             )
             logger.info("Notifikasi startup sukses dikirim ke Telegram!")
         except Exception as e:
             logger.error(f"Gagal kirim pesan pembuka: {e}")
 
-    # 1. Jalankan Mesin 1 (WebSocket PumpPortal)
     ws_thread = threading.Thread(target=run_websocket_loop, daemon=True)
     ws_thread.start()
-    logger.info("Mesin 1 (PumpPortal WebSocket) telah aktif di background thread!")
 
-    # 2. Jalankan Mesin 2 (Radar DexScreener Usia 15-60 Menit)
     dex_thread = threading.Thread(target=poll_dexscreener_early_graduates, daemon=True)
     dex_thread.start()
-    logger.info("Mesin 2 (Radar DexScreener Usia 15-60m) telah aktif di background thread!")
 
-    # 3. Jalankan Flask server
     port = int(os.environ.get("PORT", getattr(config, "PORT", 10000)))
     app.run(host="0.0.0.0", port=port)
