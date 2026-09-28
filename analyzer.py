@@ -1,22 +1,28 @@
 """
-analyzer.py - Mesin Analisis Akumulasi & Sentimen PumpAlpha v2.0
-Menggantikan analisis volume lama dengan Cumulative Volume Delta (CVD),
-Rasio Pembeli Unik, dan Audit Dev Supply < 2.5%
+analyzer.py - Mesin Analisis Akumulasi & Anti-Bot PumpAlpha v3.0
+Dilengkapi:
+- Radar Koin Early Organik (Usia 15 - 60 Menit)
+- Filter Wash Trading Berdasarkan Volume Velocity (Vol/Liq Cap)
+- Anti-Sniper Bot War & Anti-Dump M5 Real-Time
+- Verifikasi Konsentrasi Whale / Top Holder < 10.0%
 """
-
 import math
 from typing import Dict, Any, Tuple
 
 class MemecoinAccumulationAnalyzer:
     def __init__(self, 
                  min_cvd_ratio: float = 25.0,
-                 min_buy_sell_ratio: float = 1.8,
+                 min_buy_sell_ratio: float = 1.35,
                  max_dev_holding: float = 3.0,
-                 max_top10_holding: float = 25.0):
+                 max_top_holder: float = 10.0,
+                 min_age_minutes: float = 15.0,
+                 max_age_minutes: float = 120.0):
         self.min_cvd_ratio = min_cvd_ratio
         self.min_buy_sell_ratio = min_buy_sell_ratio
         self.max_dev_holding = max_dev_holding
-        self.max_top10_holding = max_top10_holding
+        self.max_top_holder = max_top_holder
+        self.min_age_minutes = min_age_minutes
+        self.max_age_minutes = max_age_minutes
 
     def calculate_cvd_delta(self, txns_m5: Dict[str, int], vol_m5: float) -> Tuple[float, float]:
         """
@@ -26,7 +32,6 @@ class MemecoinAccumulationAnalyzer:
         buys = txns_m5.get("buys", 0)
         sells = txns_m5.get("sells", 0)
         total = buys + sells
-
         if total == 0:
             return 0.0, 0.0
 
@@ -35,47 +40,97 @@ class MemecoinAccumulationAnalyzer:
         cvd_usd = vol_m5 * (buy_ratio - (1.0 - buy_ratio))
         return round(cvd_usd, 2), round(cvd_ratio, 1)
 
-    def detect_wash_trading(self, txns_m5: Dict[str, int], vol_m5: float, unique_buyers: int) -> bool:
+    def detect_wash_or_bot_trap(self, 
+                                txns_m5: Dict[str, int], 
+                                vol_m5: float, 
+                                vol_h1: float, 
+                                liquidity_usd: float,
+                                unique_buyers: int) -> Tuple[bool, str]:
         """
-        Deteksi Wash Trading: Jika transaksi sangat tinggi tapi rasio beli:jual persis 50:50,
-        atau unique buyers sangat rendah dibandingkan total transaksi.
+        Mendeteksi Jebakan Bot Sniper & Volume Palsu:
+        1. Volume Cuci Piring (M5 Vol > 3x Liq atau H1 Vol > 8x Liq)
+        2. Perang Sniper Bot (> 600 transaksi dalam 5 menit di kolam kecil)
+        3. Real-Time Dump (Sells > Buys di candle M5)
+        4. Fake Volume (Unique Wallets terlalu sedikit)
         """
         buys = txns_m5.get("buys", 0)
         sells = txns_m5.get("sells", 0)
-        total = buys + sells
+        total_m5 = buys + sells
 
-        if total > 50:
-            ratio = buys / max(1, sells)
-            # Jika rasio berada di antara 0.95 dan 1.05 pada volume besar -> indikasi wash bot
-            if 0.95 <= ratio <= 1.05 and unique_buyers < (total * 0.2):
-                return True
-        return False
+        # 1. Pintu Anti-Wash Volume (Rasio Volume vs Kolam)
+        if liquidity_usd > 0:
+            if (vol_h1 / liquidity_usd) > 8.0:
+                return True, f"Wash Trading H1 ({vol_h1/liquidity_usd:.1f}x Liq)"
+            if (vol_m5 / liquidity_usd) > 3.0:
+                return True, f"Wash Trading M5 ({vol_m5/liquidity_usd:.1f}x Liq)"
+
+        # 2. Pintu Perang Bot Sniper
+        if total_m5 > 600 and liquidity_usd < 50000:
+            return True, "Sniper Bot War (> 600 txns M5 di Kolam Rendah)"
+
+        # 3. Pintu Real-Time Dump M5 (Whale mulai jualan)
+        if total_m5 >= 20 and sells > (buys * 1.1):
+            return True, f"Sell Dump Dimulai ({sells} Sells > {buys} Buys)"
+
+        # 4. Pintu Dompet Unik Rendah
+        if total_m5 > 50 and unique_buyers < (total_m5 * 0.2):
+            return True, "Volume Semu (Sedikit Dompet Mengulang Transaksi)"
+
+        return False, "ORGANIC"
 
     def evaluate_token(self, token_data: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Evaluasi multi-faktor untuk sinyal Early Snipe (9000% Gem Filter)
+        Evaluasi Koin Early Multi-Lapisan
         """
         txns_m5 = token_data.get("txns", {}).get("m5", {"buys": 0, "sells": 0})
-        vol_m5 = token_data.get("volume", {}).get("m5", 0.0)
-        market_cap = token_data.get("marketCap", token_data.get("fdv", 0.0))
-        dev_holding = token_data.get("devHoldingPercent", 0.0)
-        top10_holding = token_data.get("top10HoldersPercent", 0.0)
-        unique_buyers = token_data.get("uniqueBuyersCount", txns_m5.get("buys", 0))
+        vol_m5 = float(token_data.get("volume", {}).get("m5", 0.0))
+        vol_h1 = float(token_data.get("volume", {}).get("h1", vol_m5 * 2.0))
+        liquidity_usd = float(token_data.get("liquidity", {}).get("usd", 0.0) or 0.0)
+        market_cap = float(token_data.get("marketCap", token_data.get("fdv", 0.0)) or 0.0)
+        
+        age_minutes = float(token_data.get("ageMinutes", 30.0))
+        dev_holding = float(token_data.get("devHoldingPercent", 0.0))
+        top_holder = float(token_data.get("topHolderPercent", 0.0))
+        unique_buyers = int(token_data.get("uniqueBuyersCount", txns_m5.get("buys", 0)))
 
-        # 1. Hitung CVD
+        # 1. Pintu Filter Usia Early (Gentoo masuk di sini!)
+        reasons = []
+        is_passed = True
+
+        if age_minutes < self.min_age_minutes:
+            is_passed = False
+            reasons.append(f"Usia koin {age_minutes:.1f}m < minimal {self.min_age_minutes}m (Menghindari sniper detik pertama)")
+
+        if age_minutes > self.max_age_minutes:
+            is_passed = False
+            reasons.append(f"Usia koin {age_minutes:.1f}m > maksimal {self.max_age_minutes}m (Bukan koin early)")
+
+        # 2. Hitung CVD & Rasio Beli
         cvd_usd, cvd_ratio = self.calculate_cvd_delta(txns_m5, vol_m5)
-
-        # 2. Hitung rasio beli / jual
         buys = txns_m5.get("buys", 0)
         sells = max(1, txns_m5.get("sells", 1))
         buy_sell_ratio = round(buys / sells, 2)
 
-        # 3. Cek wash trading
-        is_wash = self.detect_wash_trading(txns_m5, vol_m5, unique_buyers)
+        # 3. Audit Perisai Anti-Bot & Wash Trading
+        is_bot, bot_reason = self.detect_wash_or_bot_trap(
+            txns_m5=txns_m5,
+            vol_m5=vol_m5,
+            vol_h1=vol_h1,
+            liquidity_usd=liquidity_usd,
+            unique_buyers=unique_buyers
+        )
+        if is_bot:
+            is_passed = False
+            reasons.append(f"Ditolak Bot Radar: {bot_reason}")
 
-        # 4. Kriteria Kelulusan Sinyal Akumulasi
-        reasons = []
-        is_passed = True
+        # 4. Audit Konsentrasi Whale / Dev
+        if top_holder > self.max_top_holder and top_holder < 90.0:
+            is_passed = False
+            reasons.append(f"Top Holder {top_holder:.1f}% menguasai > {self.max_top_holder}% suplai (Bahaya Dump)")
+
+        if dev_holding > self.max_dev_holding:
+            is_passed = False
+            reasons.append(f"Dev Holding {dev_holding}% terlalu besar")
 
         if cvd_ratio < self.min_cvd_ratio:
             is_passed = False
@@ -83,52 +138,30 @@ class MemecoinAccumulationAnalyzer:
 
         if buy_sell_ratio < self.min_buy_sell_ratio:
             is_passed = False
-            reasons.append(f"Rasio Beli:Jual {buy_sell_ratio}x di bawah minimal {self.min_buy_sell_ratio}x")
+            reasons.append(f"Rasio Beli:Jual {buy_sell_ratio}x < {self.min_buy_sell_ratio}x")
 
-        if dev_holding > self.max_dev_holding:
-            is_passed = False
-            reasons.append(f"Dev holding {dev_holding}% terlalu beresiko (max {self.max_dev_holding}%)")
-
-        if top10_holding > self.max_top10_holding:
-            is_passed = False
-            reasons.append(f"Top 10 memegang {top10_holding}% (konsentrasi whale berbahaya)")
-
-        if is_wash:
-            is_passed = False
-            reasons.append("Pola wash-trading terdeteksi")
-
-        # 5. Skor 0 - 100 dengan skala bertingkat (Graded Scoring)
+        # 5. Skoring Dinamis (0 - 100)
         score = 50
+        if cvd_ratio >= 40: score += 20
+        elif cvd_ratio >= 25: score += 12
 
-        # Poin CVD (Net Inflow akumulasi nyata)
-        if cvd_ratio >= 40:
-            score += 20
-        elif cvd_ratio >= 30:
-            score += 15  # <--- Koin $moin (+33% CVD) dapat poin di sini!
+        if buy_sell_ratio >= 2.0: score += 15
+        elif buy_sell_ratio >= 1.4: score += 10
 
-        # Poin Rasio Beli vs Jual
-        if buy_sell_ratio >= 2.5:
-            score += 15
-        elif buy_sell_ratio >= 1.8:
-            score += 10  # <--- Koin $moin (1.99x rasio) dapat poin di sini!
+        if top_holder <= 5.0 and top_holder > 0: score += 15
 
-        # Poin Dev Safety
-        if dev_holding <= 2.0:
-            score += 15
-
-        # Penalti Wash Trading
-        if is_wash:
-            score -= 40
-
+        if is_bot: score -= 50
         score = max(5, min(99, score))
 
         return {
             "is_approved": is_passed,
             "score": score,
+            "age_minutes": age_minutes,
             "cvd_usd": cvd_usd,
             "cvd_ratio": cvd_ratio,
             "buy_sell_ratio": buy_sell_ratio,
-            "is_wash_trading": is_wash,
+            "top_holder_pct": top_holder,
+            "is_wash_trading": is_bot,
             "reasons": reasons,
-            "action": "SNIPE_ENTRY" if is_passed and score >= 75 else "SKIP"
+            "action": "EARLY_GEM_ENTRY" if is_passed and score >= 75 else "REJECTED"
         }
