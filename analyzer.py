@@ -9,8 +9,8 @@ from typing import Dict, Any, Tuple
 
 class MemecoinAccumulationAnalyzer:
     def __init__(self, 
-                 min_cvd_ratio: float = 30.0,
-                 min_buy_sell_ratio: float = 2.0,
+                 min_cvd_ratio: float = 25.0,
+                 min_buy_sell_ratio: float = 1.8,
                  max_dev_holding: float = 3.0,
                  max_top10_holding: float = 25.0):
         self.min_cvd_ratio = min_cvd_ratio
@@ -97,12 +97,28 @@ class MemecoinAccumulationAnalyzer:
             is_passed = False
             reasons.append("Pola wash-trading terdeteksi")
 
-        # Skor 0 - 100
+        # 5. Skor 0 - 100 dengan skala bertingkat (Graded Scoring)
         score = 50
-        if cvd_ratio >= 40: score += 20
-        if buy_sell_ratio >= 2.5: score += 15
-        if dev_holding <= 2.0: score += 15
-        if is_wash: score -= 40
+
+        # Poin CVD (Net Inflow akumulasi nyata)
+        if cvd_ratio >= 40:
+            score += 20
+        elif cvd_ratio >= 30:
+            score += 15  # <--- Koin $moin (+33% CVD) dapat poin di sini!
+
+        # Poin Rasio Beli vs Jual
+        if buy_sell_ratio >= 2.5:
+            score += 15
+        elif buy_sell_ratio >= 1.8:
+            score += 10  # <--- Koin $moin (1.99x rasio) dapat poin di sini!
+
+        # Poin Dev Safety
+        if dev_holding <= 2.0:
+            score += 15
+
+        # Penalti Wash Trading
+        if is_wash:
+            score -= 40
 
         score = max(5, min(99, score))
 
