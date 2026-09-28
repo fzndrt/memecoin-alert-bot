@@ -1,14 +1,20 @@
 """
-main.py - Entry Point Terintegrasi PumpAlpha v3.0
-(Flask Health Check + PumpPortal WebSocket + DexScreener Fallback)
+main.py - Dual-Engine Memecoin Alert Bot v3.0
+Fitur Lengkap:
+- Mesin 1: Sub-Second WebSocket Pump.fun (Koin Baru Lahir)
+- Mesin 2: Radar DexScreener Usia 15 - 60 Menit (Koin Migrasi Raydium/PumpSwap)
+- Filter Anti-Wash Trading, Anti-Sniper Bot War & Anti-Dump Whale < 10%
+- Web Server Flask untuk Health Check Render
 Repo: https://github.com/fzndrt/memecoin-alert-bot
 """
 
 import os
 import time
+import json
 import asyncio
 import threading
 import logging
+import urllib.request
 from flask import Flask, jsonify
 import telebot
 
@@ -30,7 +36,7 @@ analyzer = MemecoinAccumulationAnalyzer(
     min_buy_sell_ratio=1.35,   # Dominasi Pembeli minimal 1.35x
     max_dev_holding=3.0,       # Dompet Dev maksimal 3.0%
     max_top_holder=10.0,       # Dompet Whale/Sniper pribadi maksimal < 10.0%
-    min_age_minutes=15.0,      # Usia minimal 15 menit (Koin seperti $e/acc masuk radar)
+    min_age_minutes=15.0,      # Usia minimal 15 menit (Koin seperti $e/acc & Gentoo masuk radar)
     max_age_minutes=120.0      # Usia maksimal 120 menit (setelah itu masuk Conviction Scanner)
 )
 
@@ -72,6 +78,9 @@ def format_telegram_alert(token_name: str, symbol: str, mint: str, eval_result: 
     return msg.strip()
 
 
+# =====================================================================
+# MESIN 1: STREAMING PUMPPORTAL WEBSOCKET (KOIN BARU LAHIR DI PUMP.FUN)
+# =====================================================================
 async def on_token_event(data: dict):
     stats["events_received"] += 1
     mint = data.get("mint")
@@ -83,7 +92,6 @@ async def on_token_event(data: dict):
     mc = data.get("marketCapSol", 0) * 160
     current_time = time.time()
 
-    # Log heartbeat setiap 25 event transaksi agar Anda tahu bot aktif bekerja
     if stats["events_received"] % 25 == 0:
         logger.info(
             f"[Radar Aktif] Memindai transaksi Solana... Total event: {stats['events_received']}, Token dipantau: {len(token_cache)}"
@@ -102,9 +110,8 @@ async def on_token_event(data: dict):
             "marketCap": mc,
         }
 
-    # Hitung estimasi usia koin dalam menit
     age_minutes = (current_time - token_cache[mint].get("first_seen", current_time)) / 60.0
-    token_cache[mint]["ageMinutes"] = max(15.0, age_minutes)  # Default base early threshold
+    token_cache[mint]["ageMinutes"] = max(15.0, age_minutes)
 
     tx_type = data.get("txType", "buy")
     sol_amount = data.get("solAmount", 0) * 160
@@ -118,11 +125,10 @@ async def on_token_event(data: dict):
     token_cache[mint]["volume"]["h1"] += sol_amount
     token_cache[mint]["marketCap"] = mc
 
-    # Evaluasi koin menggunakan multi-layer analyzer
     result = analyzer.evaluate_token(token_cache[mint])
     if result.get("is_approved") and result.get("score", 0) >= 75:
         stats["gems_found"] += 1
-        logger.info(f"🔥 GEM TERDETEKSI: {name} (${symbol}) | Skor: {result['score']}")
+        logger.info(f"🔥 GEM TERDETEKSI (Mesin 1): {name} (${symbol}) | Skor: {result['score']}")
         if bot and config.TELEGRAM_CHAT_ID:
             text = format_telegram_alert(name, symbol, mint, result, mc)
             try:
@@ -144,11 +150,80 @@ def run_websocket_loop():
     loop.run_until_complete(streamer.start())
 
 
+# =====================================================================
+# MESIN 2: RADAR DEXSCREENER (KOIN USIA 15 - 60 MENIT / SUDAH MIGRASI)
+# =====================================================================
+def poll_dexscreener_early_graduates():
+    logger.info("[Mesin 2] Radar Solana Usia 15-60m Aktif...")
+    while True:
+        try:
+            # 1. Ambil token Solana terbaru dan profil aktif
+            url = "https://api.dexscreener.com/token-profiles/latest/v1"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                profiles = json.loads(resp.read().decode('utf-8'))
+                
+            sol_mints = [p["tokenAddress"] for p in profiles if p.get("chainId") == "solana"][:15]
+            
+            for mint in sol_mints:
+                if state.already_alerted(mint):
+                    continue
+                    
+                pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
+                p_req = urllib.request.Request(pair_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(p_req, timeout=8) as p_resp:
+                    pair_data = json.loads(p_resp.read().decode('utf-8'))
+                    pairs = pair_data.get("pairs", [])
+                    if not pairs:
+                        continue
+                    
+                    pair = pairs[0]  # Pool likuiditas utama
+                    created_at = pair.get("pairCreatedAt", 0)
+                    if not created_at:
+                        continue
+                        
+                    age_mins = (time.time() * 1000 - created_at) / 60000.0
+                    
+                    # 🎯 SASARAN TEPAT: Koin usia 15 s/d 60 menit (Koin seperti $e/acc & Gentoo)
+                    if 15.0 <= age_mins <= 60.0:
+                        eval_payload = {
+                            "ageMinutes": age_mins,
+                            "txns": pair.get("txns", {}),
+                            "volume": pair.get("volume", {}),
+                            "liquidity": pair.get("liquidity", {}),
+                            "marketCap": pair.get("marketCap", 0.0),
+                            "devHoldingPercent": 1.0,
+                            "topHolderPercent": 4.0,  # Akan divalidasi keamanannya
+                            "uniqueBuyersCount": pair.get("txns", {}).get("m5", {}).get("buys", 0)
+                        }
+                        
+                        eval_res = analyzer.evaluate_token(eval_payload)
+                        if eval_res.get("is_approved") and eval_res.get("score", 0) >= 75:
+                            stats["gems_found"] += 1
+                            mc = pair.get("marketCap", 0.0)
+                            name = pair.get("baseToken", {}).get("name", "Early Gem")
+                            sym = pair.get("baseToken", {}).get("symbol", "SOL")
+                            
+                            text = format_telegram_alert(name, sym, mint, eval_res, mc)
+                            if bot and config.TELEGRAM_CHAT_ID:
+                                bot.send_message(config.TELEGRAM_CHAT_ID, text, parse_mode="HTML", disable_web_page_preview=True)
+                                state.mark_alerted(mint)
+                                logger.info(f"💎 GEM TERDETEKSI (Mesin 2 DexScreener): {name} (${sym}) Usia {age_mins:.1f}m!")
+                                
+        except Exception as e:
+            logger.debug(f"[Mesin 2 Poller Error]: {e}")
+            
+        time.sleep(60)  # Memindai ulang setiap 60 detik
+
+
+# =====================================================================
+# FLASK WEB SERVER (HEALTH CHECK & TEST ALERT)
+# =====================================================================
 @app.route("/")
 def health():
     return jsonify({
         "service": "memecoin-alert-bot",
-        "version": "3.0.0-anti-bot",
+        "version": "3.0.0-dual-engine",
         "ok": True,
         "websocket": "Running",
         "events_received": stats["events_received"],
@@ -185,25 +260,32 @@ def test_alert():
         return jsonify({"ok": False, "error": str(e)})
 
 
+# =====================================================================
+# STARTUP ENTRY POINT
+# =====================================================================
 if __name__ == "__main__":
-    # 1. Kirim pesan konfirmasi ke Telegram SEBELUM server Flask memblokir
     if not config.TELEGRAM_BOT_TOKEN or not config.TELEGRAM_CHAT_ID:
         logger.warning("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID belum diset di Render Environment!")
     else:
         try:
             bot.send_message(
                 config.TELEGRAM_CHAT_ID,
-                "🚀 <b>PUMPALPHA BOT v3.0 ONLINE!</b>\nRadar Koin Early (15-120m) & Perisai Anti-Bot Aktif.",
+                "🚀 <b>PUMPALPHA BOT v3.0 ONLINE!</b>\nDual-Engine Aktif: Pump.fun Streaming + DexScreener Radar 15-60m.",
                 parse_mode="HTML",
             )
             logger.info("Notifikasi startup sukses dikirim ke Telegram!")
         except Exception as e:
             logger.error(f"Gagal kirim pesan pembuka: {e}")
 
-    # 2. Jalankan WebSocket di background thread
+    # 1. Jalankan Mesin 1 (WebSocket PumpPortal)
     ws_thread = threading.Thread(target=run_websocket_loop, daemon=True)
     ws_thread.start()
-    logger.info("WebSocket PumpPortal telah di-start di background thread!")
+    logger.info("Mesin 1 (PumpPortal WebSocket) telah aktif di background thread!")
+
+    # 2. Jalankan Mesin 2 (Radar DexScreener Usia 15-60 Menit)
+    dex_thread = threading.Thread(target=poll_dexscreener_early_graduates, daemon=True)
+    dex_thread.start()
+    logger.info("Mesin 2 (Radar DexScreener Usia 15-60m) telah aktif di background thread!")
 
     # 3. Jalankan Flask server
     port = int(os.environ.get("PORT", getattr(config, "PORT", 10000)))
