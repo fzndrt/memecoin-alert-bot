@@ -133,7 +133,7 @@ async def on_token_event(data: dict):
         }
 
     age_minutes = (current_time - token_cache[mint].get("first_seen", current_time)) / 60.0
-    token_cache[mint]["ageMinutes"] = max(15.0, age_minutes)
+    token_cache[mint]["ageMinutes"] = max(10.0, age_minutes)
 
     tx_type = data.get("txType", "buy")
     sol_amount = float(data.get("solAmount", 0.0) or 0.0) * 160
@@ -200,12 +200,28 @@ def poll_dexscreener_early_graduates():
     logger.info("[Mesin 2] Radar Solana Dex (Usia 15-60m) Aktif...")
     while True:
         try:
-            url = "https://api.dexscreener.com/token-profiles/latest/v1"
-            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                profiles = json.loads(resp.read().decode('utf-8'))
-                
-            sol_mints = [p["tokenAddress"] for p in profiles if p.get("chainId") == "solana"][:20]
+            # KODE BARU (Mengambil hingga 60 koin mutiara tanpa buta koin):
+sol_mints = []
+# 1. Ambil dari Profiles resmi
+try:
+    p_req = urllib.request.Request("https://api.dexscreener.com/token-profiles/latest/v1", headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(p_req, timeout=8) as resp:
+        profiles = json.loads(resp.read().decode('utf-8'))
+        sol_mints.extend([p["tokenAddress"] for p in profiles if p.get("chainId") == "solana"][:30])
+except Exception:
+    pass
+
+# 2. Ambil dari Token Boosts (Koin yang sedang trending/viral)
+try:
+    b_req = urllib.request.Request("https://api.dexscreener.com/token-boosts/latest/v1", headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(b_req, timeout=8) as resp:
+        boosts = json.loads(resp.read().decode('utf-8'))
+        sol_mints.extend([b["tokenAddress"] for b in boosts if b.get("chainId") == "solana"][:30])
+except Exception:
+    pass
+
+# Hapus duplikat alamat token
+sol_mints = list(dict.fromkeys(sol_mints))
             
             for mint in sol_mints:
                 if state.already_alerted(mint):
