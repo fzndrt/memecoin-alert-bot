@@ -34,7 +34,7 @@ analyzer = MemecoinAccumulationAnalyzer(
     min_buy_sell_ratio=1.5,    # Pembeli harus 1.5x lipat dari penjual
     max_dev_holding=2.5,       # Dompet Dev maksimal 2.5%
     max_top_holder=10.0,       # Dompet Whale maksimal 10.0%
-    min_age_minutes=15.0,      # Minimal usia 15 menit
+    min_age_minutes=10.0,      # Minimal usia 15 menit
     max_age_minutes=120.0      # Maksimal usia 120 menit
 )
 
@@ -247,7 +247,7 @@ def poll_dexscreener_early_graduates():
                     age_mins = (time.time() * 1000 - created_at) / 60000.0
                     
                     # Target Usia 15 - 60 Menit
-                    if 15.0 <= age_mins <= 60.0:
+                    if 10.0 <= age_mins <= 60.0:
                         real_top_holder = check_real_top_holder(mint)
                         if real_top_holder > 10.0:
                             logger.info(f"🚫 [DEX] Ditolak: Top Holder {real_top_holder:.1f}% > 10% ({mint})")
