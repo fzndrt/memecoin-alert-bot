@@ -294,7 +294,7 @@ def poll_dexscreener_early_graduates():
                                 bot.send_message(config.TELEGRAM_CHAT_ID, text, parse_mode="HTML", disable_web_page_preview=True)
                                 state.mark_alerted(mint)
                                 logger.info(f"💎 GEM ASLI TERDETEKSI (🔵 DEX): {name} (${sym}) | Liq: ${liq_usd:,.0f} | Usia: {age_mins:.1f}m!")
-                                
+                            time.sleep(0.4)  # ⬅️ Tambahkan jeda 0.4 detik agar bebas rate-limit DexScreener!    
         except Exception as e:
             logger.debug(f"[Mesin 2 Poller Error]: {e}")
             
