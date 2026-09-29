@@ -12,10 +12,10 @@ from typing import Dict, Any, Tuple
 class MemecoinAccumulationAnalyzer:
     def __init__(self, 
                  min_cvd_ratio: float = 25.0,
-                 min_buy_sell_ratio: float = 1.35,
+                 min_buy_sell_ratio: float = 1.55,
                  max_dev_holding: float = 3.0,
                  max_top_holder: float = 10.0,
-                 min_age_minutes: float = 15.0,
+                 min_age_minutes: float = 10.0,
                  max_age_minutes: float = 120.0):
         self.min_cvd_ratio = min_cvd_ratio
         self.min_buy_sell_ratio = min_buy_sell_ratio
