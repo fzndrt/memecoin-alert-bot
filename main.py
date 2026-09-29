@@ -228,73 +228,77 @@ def poll_dexscreener_early_graduates():
                     continue
                     
                 pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
-                p_req = urllib.request.Request(pair_url, headers={"User-Agent": "Mozilla/5.0"})
-                with urllib.request.urlopen(p_req, timeout=8) as p_resp:
-                    pair_data = json.loads(p_resp.read().decode('utf-8'))
-                    pairs = pair_data.get("pairs", [])
-                    if not pairs:
-                        continue
-                    
-                    pair = pairs[0]
-
-                    # 🛡️ 1. SYARAT LIKUIDITAS: Minimal $12,000 USD
-                    liq_usd = float(pair.get("liquidity", {}).get("usd") or 0.0)
-                    if liq_usd < 12000.0:
-                        continue
-
-                    # 🛡️ 2. SYARAT TREN HARGA: TIDAK BOLEH SEDANG DUMP / LONGSOR
-                    price_change = pair.get("priceChange", {})
-                    h1_change = float(price_change.get("h1") or 0.0)
-                    m5_change = float(price_change.get("m5") or 0.0)
-                    if h1_change < -5.0 or m5_change < -3.0:
-                        continue
-
-                    # 🛡️ 3. SYARAT AKTIVITAS TRANSAKSI: Minimal 30 Transaksi di M5
-                    txns_m5 = pair.get("txns", {}).get("m5", {})
-                    buys = txns_m5.get("buys", 0)
-                    sells = txns_m5.get("sells", 0)
-                    if buys < (sells * 1.4) or (buys + sells) < 30:
-                        continue
-
-                    created_at = pair.get("pairCreatedAt", 0)
-                    if not created_at:
-                        continue
+                try:
+                    p_req = urllib.request.Request(pair_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(p_req, timeout=8) as p_resp:
+                        pair_data = json.loads(p_resp.read().decode('utf-8'))
+                        pairs = pair_data.get("pairs", [])
+                        if not pairs:
+                            continue
                         
-                    age_mins = (time.time() * 1000 - created_at) / 60000.0
-                    
-                    # Target Usia 15 - 60 Menit
-                    if 10.0 <= age_mins <= 60.0:
-                        real_top_holder = check_real_top_holder(mint)
-                        if real_top_holder > 10.0:
-                            logger.info(f"🚫 [DEX] Ditolak: Top Holder {real_top_holder:.1f}% > 10% ({mint})")
+                        pair = pairs[0]
+
+                        # 🛡️ 1. SYARAT LIKUIDITAS: Minimal $12,000 USD
+                        liq_usd = float(pair.get("liquidity", {}).get("usd") or 0.0)
+                        if liq_usd < 12000.0:
                             continue
 
-                        eval_payload = {
-                            "ageMinutes": age_mins,
-                            "txns": pair.get("txns", {}),
-                            "volume": pair.get("volume", {}),
-                            "liquidity": {"usd": liq_usd},
-                            "marketCap": float(pair.get("marketCap") or 0.0),
-                            "devHoldingPercent": 1.0,
-                            "topHolderPercent": real_top_holder,
-                            "uniqueBuyersCount": buys
-                        }
+                        # 🛡️ 2. SYARAT TREN HARGA: TIDAK BOLEH SEDANG DUMP / LONGSOR
+                        price_change = pair.get("priceChange", {})
+                        h1_change = float(price_change.get("h1") or 0.0)
+                        m5_change = float(price_change.get("m5") or 0.0)
+                        if h1_change < -5.0 or m5_change < -3.0:
+                            continue
+
+                        # 🛡️ 3. SYARAT AKTIVITAS TRANSAKSI: Minimal 30 Transaksi di M5
+                        txns_m5 = pair.get("txns", {}).get("m5", {})
+                        buys = txns_m5.get("buys", 0)
+                        sells = txns_m5.get("sells", 0)
+                        if buys < (sells * 1.4) or (buys + sells) < 30:
+                            continue
+
+                        created_at = pair.get("pairCreatedAt", 0)
+                        if not created_at:
+                            continue
+                            
+                        age_mins = (time.time() * 1000 - created_at) / 60000.0
                         
-                        eval_res = analyzer.evaluate_token(eval_payload)
-                        if eval_res.get("is_approved") and eval_res.get("score", 0) >= 78:
-                            stats["gems_found"] += 1
-                            mc = float(pair.get("marketCap") or 0.0)
-                            name = pair.get("baseToken", {}).get("name", "Early Gem")
-                            sym = pair.get("baseToken", {}).get("symbol", "SOL")
+                        # Target Usia 10 - 60 Menit
+                        if 10.0 <= age_mins <= 60.0:
+                            real_top_holder = check_real_top_holder(mint)
+                            if real_top_holder > 10.0:
+                                logger.info(f"🚫 [DEX] Ditolak: Top Holder {real_top_holder:.1f}% > 10% ({mint})")
+                                continue
+
+                            eval_payload = {
+                                "ageMinutes": age_mins,
+                                "txns": pair.get("txns", {}),
+                                "volume": pair.get("volume", {}),
+                                "liquidity": {"usd": liq_usd},
+                                "marketCap": float(pair.get("marketCap") or 0.0),
+                                "devHoldingPercent": 1.0,
+                                "topHolderPercent": real_top_holder,
+                                "uniqueBuyersCount": buys
+                            }
                             
-                            extra = f"💧 <b>Likuiditas DEX:</b> <code>${liq_usd:,.0f}</code>"
-                            text = format_telegram_alert(name, sym, mint, eval_res, mc, "DEX", extra)
-                            
-                            if bot and config.TELEGRAM_CHAT_ID:
-                                bot.send_message(config.TELEGRAM_CHAT_ID, text, parse_mode="HTML", disable_web_page_preview=True)
-                                state.mark_alerted(mint)
-                                logger.info(f"💎 GEM ASLI TERDETEKSI (🔵 DEX): {name} (${sym}) | Liq: ${liq_usd:,.0f} | Usia: {age_mins:.1f}m!")
-                            time.sleep(0.4)  # ⬅️ Tambahkan jeda 0.4 detik agar bebas rate-limit DexScreener!    
+                            eval_res = analyzer.evaluate_token(eval_payload)
+                            if eval_res.get("is_approved") and eval_res.get("score", 0) >= 78:
+                                stats["gems_found"] += 1
+                                mc = float(pair.get("marketCap") or 0.0)
+                                name = pair.get("baseToken", {}).get("name", "Early Gem")
+                                sym = pair.get("baseToken", {}).get("symbol", "SOL")
+                                
+                                extra = f"💧 <b>Likuiditas DEX:</b> <code>${liq_usd:,.0f}</code>"
+                                text = format_telegram_alert(name, sym, mint, eval_res, mc, "DEX", extra)
+                                
+                                if bot and config.TELEGRAM_CHAT_ID:
+                                    bot.send_message(config.TELEGRAM_CHAT_ID, text, parse_mode="HTML", disable_web_page_preview=True)
+                                    state.mark_alerted(mint)
+                                    logger.info(f"💎 GEM ASLI TERDETEKSI (🔵 DEX): {name} (${sym}) | Liq: ${liq_usd:,.0f} | Usia: {age_mins:.1f}m!")
+                except Exception:
+                    pass
+                finally:
+                    time.sleep(0.4)    
         except Exception as e:
             logger.debug(f"[Mesin 2 Poller Error]: {e}")
             
