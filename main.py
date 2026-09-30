@@ -219,7 +219,30 @@ def poll_dexscreener_early_graduates():
                     sol_mints.extend([b["tokenAddress"] for b in boosts if b.get("chainId") == "solana"][:30])
             except Exception:
                 pass
+# 2. Ambil dari Token Boosts (Koin yang sedang trending/viral)
+            try:
+                b_req = urllib.request.Request("https://api.dexscreener.com/token-boosts/latest/v1", headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(b_req, timeout=8) as resp:
+                    boosts = json.loads(resp.read().decode('utf-8'))
+                    sol_mints.extend([b["tokenAddress"] for b in boosts if b.get("chainId") == "solana"][:30])
+            except Exception:
+                pass
 
+            # 3. Ambil dari Pasangan DEX Baru (Koin Fresh Listing / Tidak Beli Boost)
+            try:
+                s_req = urllib.request.Request("https://api.dexscreener.com/latest/dex/search?q=SOL", headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(s_req, timeout=8) as resp:
+                    search_data = json.loads(resp.read().decode('utf-8'))
+                    for p in search_data.get("pairs", [])[:30]:
+                        if p.get("chainId") == "solana":
+                            addr = p.get("baseToken", {}).get("address")
+                            if addr:
+                                sol_mints.append(addr)
+            except Exception:
+                pass
+
+            # Hapus duplikat alamat token
+            sol_mints = list(dict.fromkeys(sol_mints))
             # Hapus duplikat alamat token
             sol_mints = list(dict.fromkeys(sol_mints))
             
