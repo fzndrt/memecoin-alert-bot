@@ -257,32 +257,32 @@ def poll_dexscreener_early_graduates():
                             continue
 
                         # -------------------------------------------------------------
-# 🛡️ FORMULA DIP-REVERSAL (TANGKAP PANTULAN KOIN 50x PASCA-LISTING)
-# -------------------------------------------------------------
-price_change = pair.get("priceChange", {})
-h1_change = float(price_change.get("h1") or 0.0)
-m5_change = float(price_change.get("m5") or 0.0)
+                        # 🛡️ FORMULA DIP-REVERSAL (TANGKAP PANTULAN KOIN 50x PASCA-LISTING)
+                        # -------------------------------------------------------------
+                        price_change = pair.get("priceChange", {})
+                        h1_change = float(price_change.get("h1") or 0.0)
+                        m5_change = float(price_change.get("m5") or 0.0)
 
-# 1. H1 Toleran: Tolak koin yang hancur lebur (> -25%), tapi izinkan koreksi sehat (-20% s/d +150%)
-if h1_change < -25.0:
-    continue
+                        # 1. H1 Toleran: Tolak koin yang hancur lebur (> -25%), tapi izinkan koreksi sehat (-20% s/d +150%)
+                        if h1_change < -25.0:
+                            continue
 
-# 2. M5 WAJIB HIJAU: Menit ini WAJIB sedang memantul naik (Bukan sedang longsor!)
-# Koin yang sedang minus di M5 (misal -3%) LANGSUNG DITOLAK karena masih jatuh!
-if m5_change < 1.0:
-    continue
+                        # 2. M5 WAJIB HIJAU: Menit ini WAJIB sedang memantul naik (Bukan sedang longsor!)
+                        # Koin yang sedang minus di M5 (misal -3%) LANGSUNG DITOLAK karena masih jatuh!
+                        if m5_change < 1.0:
+                            continue
 
-# 3. DOMINASI PEMBELI DI M5: Pembeli saat mantul wajib minimal 1.60x penjual
-txns_m5 = pair.get("txns", {}).get("m5", {})
-buys = txns_m5.get("buys", 0)
-sells = txns_m5.get("sells", 0)
-if buys < (sells * 1.60) or (buys + sells) < 25:
-    continue
+                        # 3. DOMINASI PEMBELI DI M5: Pembeli saat mantul wajib minimal 1.60x penjual
+                        txns_m5 = pair.get("txns", {}).get("m5", {})
+                        buys = txns_m5.get("buys", 0)
+                        sells = txns_m5.get("sells", 0)
+                        if buys < (sells * 1.60) or (buys + sells) < 25:
+                            continue
 
-# 4. TOLAK JIKA PENJUAL MASIH TERLALU BANYAK (> 38% dari total order M5)
-total_m5 = buys + sells
-if total_m5 > 0 and (sells / total_m5) > 0.38:
-    continue
+                        # 4. TOLAK JIKA PENJUAL MASIH TERLALU BANYAK (> 38% dari total order M5)
+                        total_m5 = buys + sells
+                        if total_m5 > 0 and (sells / total_m5) > 0.38:
+                            continue
 
                         created_at = pair.get("pairCreatedAt", 0)
                         if not created_at:
