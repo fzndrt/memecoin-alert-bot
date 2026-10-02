@@ -1,4 +1,41 @@
-"""
+# 🛡️ 1. SYARAT LIKUIDITAS: Minimal $18,000 USD
+                        liq_usd = float(pair.get("liquidity", {}).get("usd") or 0.0)
+                        if liq_usd < 18000.0:
+                            continue
+
+                        txns_all = pair.get("txns", {})
+                        txns_h1 = txns_all.get("h1", {})
+                        h1_tx_count = int(txns_h1.get("buys", 0)) + int(txns_h1.get("sells", 0))
+                        
+                        txns_m5 = txns_all.get("m5", {})
+                        m5_tx_count = int(txns_m5.get("buys", 0)) + int(txns_m5.get("sells", 0))
+
+                        vol_h1 = float(pair.get("volume", {}).get("h1") or 0.0)
+                        vol_m5 = float(pair.get("volume", {}).get("m5") or 0.0)
+
+                        # 🚫 GEMBOK ANOMALI: TRANSAKSI BANYAK TAPI NILAI ORDER KECIL (BOT TEMBAK RECEH)
+                        if h1_tx_count >= 300:
+                            avg_val_h1 = vol_h1 / max(1, h1_tx_count)
+                            if avg_val_h1 < 25.0:
+                                logger.info(f"🚫 [DEX] Ditolak: Micro-Bot Trap (Avg order ${avg_val_h1:.1f} < $25 di {h1_tx_count} txns) ({mint})")
+                                continue
+
+                        # 🚫 GEMBOK ANOMALI: RIBUAN TXN TAPI LIKUIDITAS TIDAK NAIK (< $35k)
+                        if liq_usd < 35000.0 and h1_tx_count > 600:
+                            logger.info(f"🚫 [DEX] Ditolak: Anomali Txn Banyak ({h1_tx_count} txns) tapi Kolam Dangkal (${liq_usd:,.0f}) ({mint})")
+                            continue
+
+                        # 🚫 GEMBOK AUDIT RASIO VOLUME VS LIKUIDITAS (ANTI-WASH TRADING)
+                        if liq_usd > 0:
+                            vol_liq_h1 = vol_h1 / liq_usd
+                            vol_liq_m5 = vol_m5 / liq_usd
+                            
+                            if vol_liq_h1 > 6.5:
+                                logger.info(f"🚫 [DEX] Ditolak: Wash Trading H1 {vol_liq_h1:.1f}x > 6.5x ({mint})")
+                                continue
+                            if vol_liq_m5 > 2.2:
+                                logger.info(f"🚫 [DEX] Ditolak: Wash Trading M5 {vol_liq_m5:.1f}x > 2.2x ({mint})")
+                                continue"""
 main.py - Dual-Engine Memecoin Alert Bot v3.2 (Super Strict Gem Radar)
 Repo: https://github.com/fzndrt/memecoin-alert-bot
 Fitur:
@@ -41,7 +78,21 @@ analyzer = MemecoinAccumulationAnalyzer(
 token_cache = {}
 stats = {"events_received": 0, "gems_found": 0}
 
+# 1. Ambang Batas Skor RugCheck Ketat (< 450)
+            if score > 450:
+                return 0.0, score, False, f"RugCheck Score Bahaya ({score})"
 
+            # 2. Deteksi Klaster Sindikat Pecah Dompet (Split-Wallets)
+            top_holders = data.get("topHolders", [])
+            non_pool_pcts = [float(h.get("pct", 0.0)) for h in top_holders if float(h.get("pct", 0.0)) < 85.0]
+            if len(non_pool_pcts) >= 5:
+                rounded_pcts = [round(p, 1) for p in non_pool_pcts[:12]]
+                from collections import Counter
+                counts = Counter(rounded_pcts)
+                for pct_val, freq in counts.items():
+                    if pct_val >= 0.3 and freq >= 4:
+                        return top_holder, score, False, f"Sindikat Split-Wallet ({freq} dompet ~{pct_val}%)"
+                        
 def check_real_top_holder(mint: str) -> float:
     """Mengambil kepemilikan holder terbesar dari RugCheck on-chain"""
     try:
@@ -251,38 +302,44 @@ def poll_dexscreener_early_graduates():
                         
                         pair = pairs[0]
 
-                        # 🛡️ 1. SYARAT LIKUIDITAS: Minimal $12,000 USD
+                        # 🛡️ 1. SYARAT LIKUIDITAS: Minimal $18,000 USD
                         liq_usd = float(pair.get("liquidity", {}).get("usd") or 0.0)
-                        if liq_usd < 12000.0:
+                        if liq_usd < 18000.0:
                             continue
 
-                        # -------------------------------------------------------------
-                        # 🛡️ FORMULA DIP-REVERSAL (TANGKAP PANTULAN KOIN 50x PASCA-LISTING)
-                        # -------------------------------------------------------------
-                        price_change = pair.get("priceChange", {})
-                        h1_change = float(price_change.get("h1") or 0.0)
-                        m5_change = float(price_change.get("m5") or 0.0)
+                        txns_all = pair.get("txns", {})
+                        txns_h1 = txns_all.get("h1", {})
+                        h1_tx_count = int(txns_h1.get("buys", 0)) + int(txns_h1.get("sells", 0))
+                        
+                        txns_m5 = txns_all.get("m5", {})
+                        m5_tx_count = int(txns_m5.get("buys", 0)) + int(txns_m5.get("sells", 0))
 
-                        # 1. H1 Toleran: Tolak koin yang hancur lebur (> -25%), tapi izinkan koreksi sehat (-20% s/d +150%)
-                        if h1_change < -25.0:
+                        vol_h1 = float(pair.get("volume", {}).get("h1") or 0.0)
+                        vol_m5 = float(pair.get("volume", {}).get("m5") or 0.0)
+
+                        # 🚫 GEMBOK ANOMALI: TRANSAKSI BANYAK TAPI NILAI ORDER KECIL (BOT TEMBAK RECEH)
+                        if h1_tx_count >= 300:
+                            avg_val_h1 = vol_h1 / max(1, h1_tx_count)
+                            if avg_val_h1 < 25.0:
+                                logger.info(f"🚫 [DEX] Ditolak: Micro-Bot Trap (Avg order ${avg_val_h1:.1f} < $25 di {h1_tx_count} txns) ({mint})")
+                                continue
+
+                        # 🚫 GEMBOK ANOMALI: RIBUAN TXN TAPI LIKUIDITAS TIDAK NAIK (< $35k)
+                        if liq_usd < 35000.0 and h1_tx_count > 600:
+                            logger.info(f"🚫 [DEX] Ditolak: Anomali Txn Banyak ({h1_tx_count} txns) tapi Kolam Dangkal (${liq_usd:,.0f}) ({mint})")
                             continue
 
-                        # 2. M5 WAJIB HIJAU: Menit ini WAJIB sedang memantul naik (Bukan sedang longsor!)
-                        # Koin yang sedang minus di M5 (misal -3%) LANGSUNG DITOLAK karena masih jatuh!
-                        if m5_change < 1.0:
-                            continue
-
-                        # 3. DOMINASI PEMBELI DI M5: Pembeli saat mantul wajib minimal 1.60x penjual
-                        txns_m5 = pair.get("txns", {}).get("m5", {})
-                        buys = txns_m5.get("buys", 0)
-                        sells = txns_m5.get("sells", 0)
-                        if buys < (sells * 1.60) or (buys + sells) < 25:
-                            continue
-
-                        # 4. TOLAK JIKA PENJUAL MASIH TERLALU BANYAK (> 38% dari total order M5)
-                        total_m5 = buys + sells
-                        if total_m5 > 0 and (sells / total_m5) > 0.38:
-                            continue
+                        # 🚫 GEMBOK AUDIT RASIO VOLUME VS LIKUIDITAS (ANTI-WASH TRADING)
+                        if liq_usd > 0:
+                            vol_liq_h1 = vol_h1 / liq_usd
+                            vol_liq_m5 = vol_m5 / liq_usd
+                            
+                            if vol_liq_h1 > 6.5:
+                                logger.info(f"🚫 [DEX] Ditolak: Wash Trading H1 {vol_liq_h1:.1f}x > 6.5x ({mint})")
+                                continue
+                            if vol_liq_m5 > 2.2:
+                                logger.info(f"🚫 [DEX] Ditolak: Wash Trading M5 {vol_liq_m5:.1f}x > 2.2x ({mint})")
+                                continue
 
                         created_at = pair.get("pairCreatedAt", 0)
                         if not created_at:
