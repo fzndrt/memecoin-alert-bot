@@ -1,9 +1,12 @@
+"""
 main.py - Dual-Engine Memecoin Alert Bot v3.2 (Super Strict Gem Radar)
 Repo: https://github.com/fzndrt/memecoin-alert-bot
 Fitur:
 - Pembeda Label Koin: 🟡 PUMP.FUN RADAR vs 🔵 SOLANA DEX GRADUATE
-- Filter Ketat Anti-Koin Mati (MC Min $18k di Pump.fun, Liq Min $12k di DEX)
+- Filter Ketat Anti-Koin Mati (MC Min $18k di Pump.fun, Liq Min $18k di DEX)
 - Anti-Dump: Menolak koin dengan tren harga merah/longsor
+- Anti-Rug & Anti-Sindikat: RugCheck audit & deteksi split-wallets
+- Anti Micro-Bot: Menolak spam order receh & wash-trading
 """
 
 import os
@@ -13,6 +16,7 @@ import asyncio
 import threading
 import logging
 import urllib.request
+from collections import Counter
 from flask import Flask, jsonify
 import telebot
 
@@ -33,49 +37,63 @@ analyzer = MemecoinAccumulationAnalyzer(
     min_buy_sell_ratio=1.5,    # Pembeli harus 1.5x lipat dari penjual
     max_dev_holding=2.5,       # Dompet Dev maksimal 2.5%
     max_top_holder=10.0,       # Dompet Whale maksimal 10.0%
-    min_age_minutes=10.0,      # Minimal usia 15 menit
+    min_age_minutes=10.0,      # Minimal usia 10 menit
     max_age_minutes=120.0      # Maksimal usia 120 menit
 )
 
 token_cache = {}
 stats = {"events_received": 0, "gems_found": 0}
 
-# 1. Ambang Batas Skor RugCheck Ketat (< 450)
-            if score > 450:
-                return 0.0, score, False, f"RugCheck Score Bahaya ({score})"
-
-            # 2. Deteksi Klaster Sindikat Pecah Dompet (Split-Wallets)
-            top_holders = data.get("topHolders", [])
-            non_pool_pcts = [float(h.get("pct", 0.0)) for h in top_holders if float(h.get("pct", 0.0)) < 85.0]
-            if len(non_pool_pcts) >= 5:
-                rounded_pcts = [round(p, 1) for p in non_pool_pcts[:12]]
-                from collections import Counter
-                counts = Counter(rounded_pcts)
-                for pct_val, freq in counts.items():
-                    if pct_val >= 0.3 and freq >= 4:
-                        return top_holder, score, False, f"Sindikat Split-Wallet ({freq} dompet ~{pct_val}%)"
-                        
 def check_real_top_holder(mint: str) -> float:
-    """Mengambil kepemilikan holder terbesar & audit on-chain RugCheck"""
+    """Mengambil kepemilikan holder terbesar & audit on-chain RugCheck (Anti-Rug, Anti-Sindikat Split-Wallet)"""
     try:
         url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/report"
         req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
         with urllib.request.urlopen(req, timeout=4) as resp:
             data = json.loads(resp.read().decode('utf-8'))
             
-            # Tolak langsung jika skor risiko tinggi
+            # 1. Tolak jika skor risiko bahaya
             score = int(data.get("score") or 0)
             if score > 450:
-                logger.info(f"🚫 [RugCheck] Ditolak: Skor bahaya ({score} > 450) ({mint})")
+                logger.info(f"🚫 [RugCheck] Ditolak: Skor risiko bahaya ({score} > 450) ({mint})")
                 return 999.0
 
+            # 2. Audit Bahaya On-chain: Mintable / Freeze Authority / LP Bahaya
+            risks = data.get("risks", [])
+            for r in risks:
+                r_name = str(r.get("name", "")).lower()
+                r_level = str(r.get("level", "")).lower()
+                if "freeze" in r_name or "mint" in r_name or r_level == "danger":
+                    logger.info(f"🚫 [RugCheck] Ditolak: Bahaya Fatal '{r.get('name')}' ({mint})")
+                    return 999.0
+
             top_holders = data.get("topHolders", [])
+            
+            # 3. DETEKSI SINDIKAT PECAH DOMPET (SPLIT-WALLETS CLUSTER)
+            non_pool_pcts = []
             for h in top_holders:
-                addr = h.get("address", "")
-                owner = h.get("owner", "")
-                pct = float(h.get("pct", 0.0))
-                # Lewati dex pool
-                if "pool" in addr.lower() or "raydium" in addr.lower() or "meteora" in addr.lower() or "pump" in addr.lower():
+                addr = str(h.get("address", "")).lower()
+                pct = float(h.get("pct", 0.0) or 0.0)
+                # Filter agar dompet LP / Pool Raydium / Meteora / Pump tidak dihitung
+                if any(dex in addr for dex in ["pool", "raydium", "meteora", "pump", "openbook"]):
+                    continue
+                if pct < 85.0:  # Abaikan jika itu akun burner / bonding curve
+                    non_pool_pcts.append(pct)
+
+            # Jika ada 4 dompet atau lebih yang memegang persentase saldo identik
+            if len(non_pool_pcts) >= 4:
+                rounded_pcts = [round(p, 1) for p in non_pool_pcts[:12]]
+                counts = Counter(rounded_pcts)
+                for pct_val, freq in counts.items():
+                    if pct_val >= 0.3 and freq >= 4:
+                        logger.info(f"🚫 [Anti-Sindikat] Ditolak: Split-Wallet Terdeteksi ({freq} dompet memegang persis ~{pct_val}%) ({mint})")
+                        return 999.0
+
+            # 4. Ambil kepemilikan dompet paus (whale) murni non-pool
+            for h in top_holders:
+                addr = str(h.get("address", "")).lower()
+                pct = float(h.get("pct", 0.0) or 0.0)
+                if any(dex in addr for dex in ["pool", "raydium", "meteora", "pump", "openbook"]):
                     continue
                 return pct
     except Exception:
@@ -89,45 +107,36 @@ def format_telegram_alert(token_name: str, symbol: str, mint: str, eval_result: 
     age = eval_result.get("age_minutes", 0.0)
     top_holder = eval_result.get("top_holder_pct", 0.0)
 
-    # Label Visual yang Jelas sesuai Sumber Koin
     if source == "PUMPFUN":
         header_badge = "🟡 <b>[PUMP.FUN LIVE RADAR]</b>"
         stage_desc = "Fase Akumulasi Kurva Bonding (25% - 75%)"
     else:
         header_badge = "🔵 <b>[SOLANA DEX GRADUATE]</b>"
-        stage_desc = "Resmi Listing di Raydium / PumpSwap"
+        stage_desc = "Resmi Listing di Raydium/DEX (Lolos Migrasi)"
 
-    holder_str = f"{top_holder:.1f}% (Aman &lt; 10%)" if top_holder > 0 else "Distribusi Bersih"
-
-    msg = f"""{header_badge}
-💎 <b>{token_name} (${symbol})</b>
-━━━━━━━━━━━━━━━━━━━━
-🎯 <b>PumpAlpha Score:</b> <code>{score}/100</code>
-📍 <b>Status Platform:</b> <code>{stage_desc}</code>
-⏳ <b>Usia Koin:</b> <code>{age:.1f} Menit</code>
-💰 <b>Market Cap:</b> <code>${mc:,.0f}</code>
-{extra_info}
-📊 <b>Net Inflow (CVD):</b> <code>+{cvd_ratio}%</code>
-⚡ <b>Rasio Pembeli:</b> <code>{buy_ratio}x Buyers Dominance</code>
-━━━━━━━━━━━━━━━━━━━━
-🛡️ <b>Audit Keamanan & Integritas:</b>
-• Top Whale Terbesar: <code>{holder_str}</code>
-• Volume Status: <code>VOLUME ASLI (Bukan Bot Wash)</code>
-• Anti-Dump Filter: <code>LOLOS (Tren Harga Naik/Stabil)</code>
-
-📋 <b>Mint Address:</b>
-<code>{mint}</code>
-
-⚡ <b>Perintah Quick Snipe:</b>
-<code>/snipe {mint} 0.5</code>
-
-🔗 <b>Direct Trading Links:</b>
-<a href="https://dexscreener.com/solana/{mint}">[DexScreener]</a> · <a href="https://photon-sol.tinyastro.io/en/r/@alpha/{mint}">[Photon SOL]</a> · <a href="https://neo.bullx.io/terminal?chainId=1399811149&address={mint}">[BullX]</a>"""
-    return msg.strip()
-
+    text = (
+        f"{header_badge}\n"
+        f"👑 <b>POTENSI GEM DITEMUKAN (SKOR: {score}/100)</b>\n"
+        f"🏷️ <i>{stage_desc}</i>\n\n"
+        f"🪙 <b>Koin:</b> {token_name} (<code>${symbol}</code>)\n"
+        f"💰 <b>Market Cap:</b> <code>${mc:,.0f}</code>\n"
+        f"{extra_info}\n"
+        f"⏳ <b>Usia Koin:</b> <code>{age:.1f} Menit</code>\n\n"
+        f"📊 <b>ANALISIS ON-CHAIN:</b>\n"
+        f"├ 🚀 <b>Net Inflow (CVD):</b> <code>+{cvd_ratio:.1f}%</code>\n"
+        f"├ 👥 <b>Rasio Pembeli:</b> <code>{buy_ratio:.2f}x Penjual</code>\n"
+        f"└ 🐋 <b>Top Holder:</b> <code>{top_holder:.1f}%</code> (Aman dari Whale)\n\n"
+        f"🔍 <b>Kontrak Mint:</b>\n<code>{mint}</code>\n\n"
+        f"🔗 <b>Akses Cepat & Trading:</b>\n"
+        f"• <a href=\"https://pump.fun/coin/{mint}\">Buka di Pump.fun</a>\n"
+        f"• <a href=\"https://dexscreener.com/solana/{mint}\">Grafik DexScreener</a>\n"
+        f"• <a href=\"https://rugcheck.xyz/tokens/{mint}\">Audit RugCheck</a>\n"
+        f"• <a href=\"https://t.me/PhotonSolanaBot?start={mint}\">Beli via Photon Bot</a>"
+    )
+    return text
 
 # =====================================================================
-# MESIN 1: PUMPPORTAL WEBSOCKET (SUPER KETAT - MIN MC $18,000 & VOL $1,500)
+# MESIN 1: RADAR PUMP.FUN WEBSOCKET
 # =====================================================================
 async def on_token_event(data: dict):
     stats["events_received"] += 1
@@ -147,65 +156,69 @@ async def on_token_event(data: dict):
             "first_seen": current_time,
             "txns": {"m5": {"buys": 0, "sells": 0}},
             "volume": {"m5": 0.0, "h1": 0.0},
-            "liquidity": {"usd": max(8000.0, mc * 0.3)},
-            "devHoldingPercent": float(data.get("devHoldingPercent", 1.0)),
-            "topHolderPercent": 3.0,
+            "history": [],
             "marketCap": mc,
+            "bonding_curve": float(data.get("vSolInBondingCurve", 0.0) or 0.0)
         }
 
-    age_minutes = (current_time - token_cache[mint].get("first_seen", current_time)) / 60.0
-    token_cache[mint]["ageMinutes"] = max(10.0, age_minutes)
+    tok = token_cache[mint]
+    tok["marketCap"] = mc
+    tok["bonding_curve"] = float(data.get("vSolInBondingCurve", 0.0) or 0.0)
 
-    tx_type = data.get("txType", "buy")
-    sol_amount = float(data.get("solAmount", 0.0) or 0.0) * 160
+    is_buy = data.get("txType") == "buy"
+    sol_amount = float(data.get("solAmount", 0.0) or 0.0)
+    usd_val = sol_amount * 160
 
-    if tx_type == "buy":
-        token_cache[mint]["txns"]["m5"]["buys"] += 1
+    if is_buy:
+        tok["txns"]["m5"]["buys"] += 1
+        tok["volume"]["m5"] += usd_val
+        tok["volume"]["h1"] += usd_val
     else:
-        token_cache[mint]["txns"]["m5"]["sells"] += 1
+        tok["txns"]["m5"]["sells"] += 1
+        tok["volume"]["m5"] -= (usd_val * 0.5)
 
-    token_cache[mint]["volume"]["m5"] += sol_amount
-    token_cache[mint]["volume"]["h1"] += sol_amount
-    token_cache[mint]["marketCap"] = mc
+    tok["history"].append({"time": current_time, "is_buy": is_buy, "val": usd_val})
 
-    # 🚫 GEMBOK 1: TOLAK KOIN MATI DENGAN MC RENDAH (5boJpm MC $3.5k gugur di sini!)
-    # Koin yang akan terbang ke jutaan dollar kurva bonding-nya minimal harus sudah mencapai $18.000!
-    if mc < 18000.0:
+    # FILTER KETAT PUMP.FUN:
+    if mc < 18000.0 or mc > 70000.0:
         return
 
-    # 🚫 GEMBOK 2: TOLAK VOLUME RECEHAN (Wajib minimal $1,500 akumulasi di 5 menit terakhir)
-    if token_cache[mint]["volume"]["m5"] < 1500.0:
+    bonding_pct = min(100.0, (tok["bonding_curve"] / 85.0) * 100.0) if tok["bonding_curve"] > 0 else 0.0
+    if bonding_pct > 0 and (bonding_pct < 25.0 or bonding_pct > 80.0):
         return
 
-    # 🚫 GEMBOK 3: TOLAK JIKA PENJUAL LEBIH BANYAK DARI PEMBELI
-    buys = token_cache[mint]["txns"]["m5"]["buys"]
-    sells = token_cache[mint]["txns"]["m5"]["sells"]
-    if buys < (sells * 1.5) or (buys + sells) < 25:
+    age_mins = (current_time - tok["first_seen"]) / 60.0
+    if age_mins < 10.0:
         return
 
-    result = analyzer.evaluate_token(token_cache[mint])
-    if result.get("is_approved") and result.get("score", 0) >= 78:
-        # Cek On-Chain Top Holder
-        real_top_holder = check_real_top_holder(mint)
-        if real_top_holder > 10.0:
-            logger.info(f"🚫 [Pump.fun] Ditolak: Top Holder {real_top_holder:.1f}% > 10% ({mint})")
-            return
+    real_top_holder = check_real_top_holder(mint)
+    if real_top_holder > 10.0:
+        return
 
-        result["top_holder_pct"] = real_top_holder
+    eval_payload = {
+        "ageMinutes": age_mins,
+        "txns": tok["txns"],
+        "volume": tok["volume"],
+        "liquidity": {"usd": mc * 0.4},
+        "marketCap": mc,
+        "devHoldingPercent": 1.2,
+        "topHolderPercent": real_top_holder,
+        "uniqueBuyersCount": tok["txns"]["m5"]["buys"]
+    }
+
+    eval_res = analyzer.evaluate_token(eval_payload)
+    if eval_res.get("is_approved") and eval_res.get("score", 0) >= 80:
         stats["gems_found"] += 1
-        logger.info(f"🔥 GEM TERDETEKSI (🟡 PUMP.FUN): {name} (${symbol}) | MC: ${mc:,.0f} | Skor: {result['score']}")
-        
-        bonding_pct = min(99.0, (mc / 65000.0) * 100.0)
         extra = f"📈 <b>Kurva Bonding:</b> <code>{bonding_pct:.1f}% Terisi</code>"
-
+        text = format_telegram_alert(name, symbol, mint, eval_res, mc, "PUMPFUN", extra)
+        
         if bot and config.TELEGRAM_CHAT_ID:
-            text = format_telegram_alert(name, symbol, mint, result, mc, "PUMPFUN", extra)
             try:
                 bot.send_message(config.TELEGRAM_CHAT_ID, text, parse_mode="HTML", disable_web_page_preview=True)
                 state.mark_alerted(mint)
+                logger.info(f"💎 GEM ASLI TERDETEKSI (🟡 PUMP.FUN): {name} (${symbol}) | MC: ${mc:,.0f}!")
             except Exception as e:
                 logger.error(f"Gagal kirim Telegram: {e}")
-
 
 def run_websocket_loop():
     loop = asyncio.new_event_loop()
@@ -213,17 +226,14 @@ def run_websocket_loop():
     streamer = PumpPortalStreamer(on_token_trade_callback=on_token_event)
     loop.run_until_complete(streamer.start())
 
-
 # =====================================================================
-# MESIN 2: RADAR DEXSCREENER (SUPER KETAT - MIN LIQ $12,000 & ANTI-CRASH)
+# MESIN 2: RADAR SOLANA DEX (MIN LIQUIDITY $18k & ANTI DUMP/BOT)
 # =====================================================================
 def poll_dexscreener_early_graduates():
-    logger.info("[Mesin 2] Radar Solana Dex (Usia 15-60m) Aktif...")
+    logger.info("[Mesin 2] Radar Solana Dex Aktif...")
     while True:
         try:
             sol_mints = []
-            
-            # 1. Ambil dari Profiles resmi
             try:
                 p_req = urllib.request.Request("https://api.dexscreener.com/token-profiles/latest/v1", headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(p_req, timeout=8) as resp:
@@ -232,7 +242,6 @@ def poll_dexscreener_early_graduates():
             except Exception:
                 pass
 
-            # 2. Ambil dari Token Boosts (Koin yang sedang trending/viral)
             try:
                 b_req = urllib.request.Request("https://api.dexscreener.com/token-boosts/latest/v1", headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(b_req, timeout=8) as resp:
@@ -241,7 +250,6 @@ def poll_dexscreener_early_graduates():
             except Exception:
                 pass
 
-            # 3. Ambil dari Pasangan DEX Baru (Koin Fresh Listing / Tidak Beli Boost)
             try:
                 s_req = urllib.request.Request("https://api.dexscreener.com/latest/dex/search?q=SOL", headers={"User-Agent": "Mozilla/5.0"})
                 with urllib.request.urlopen(s_req, timeout=8) as resp:
@@ -254,13 +262,12 @@ def poll_dexscreener_early_graduates():
             except Exception:
                 pass
 
-            # Hapus duplikat alamat token
-            sol_mints = list(dict.fromkeys(sol_mints))
-            
+            sol_mints = list(set(sol_mints))
+
             for mint in sol_mints:
                 if state.already_alerted(mint):
                     continue
-                    
+
                 pair_url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
                 try:
                     p_req = urllib.request.Request(pair_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -277,53 +284,30 @@ def poll_dexscreener_early_graduates():
                         if liq_usd < 18000.0:
                             continue
 
-                        # 🚫 GEMBOK ANOMALI BOT: TRANSAKSI BANYAK TAPI ORDER RECEH & KOLAM DANGKAL
-                        txns_all = pair.get("txns", {})
-                        txns_h1 = txns_all.get("h1", {})
-                        h1_tx_count = int(txns_h1.get("buys", 0)) + int(txns_h1.get("sells", 0))
-
-                        vol_h1 = float(pair.get("volume", {}).get("h1") or 0.0)
-                        vol_m5 = float(pair.get("volume", {}).get("m5") or 0.0)
-
-                        # A. Tolak jika transaksi >= 300 tapi rata-rata order < $25 (Bot receh $1-$5)
-                        if h1_tx_count >= 300 and (vol_h1 / max(1, h1_tx_count)) < 25.0:
-                            continue
-
-                        # B. Tolak jika transaksi > 600 tapi kolam stagnan (< $35k)
-                        if liq_usd < 35000.0 and h1_tx_count > 600:
-                            continue
-
-                        # C. Tolak Wash-Trading (Volume digelembungkan > 6.5x kolam)
-                        if liq_usd > 0 and (vol_h1 / liq_usd) > 6.5:
-                            continue
-
+                        # 🚫 GEMBOK ANOMALI BOT & WASH-TRADING
                         txns_all = pair.get("txns", {})
                         txns_h1 = txns_all.get("h1", {})
                         h1_tx_count = int(txns_h1.get("buys", 0)) + int(txns_h1.get("sells", 0))
                         
-                        txns_m5 = txns_all.get("m5", {})
-                        m5_tx_count = int(txns_m5.get("buys", 0)) + int(txns_m5.get("sells", 0))
-
                         vol_h1 = float(pair.get("volume", {}).get("h1") or 0.0)
                         vol_m5 = float(pair.get("volume", {}).get("m5") or 0.0)
 
-                        # 🚫 GEMBOK ANOMALI: TRANSAKSI BANYAK TAPI NILAI ORDER KECIL (BOT TEMBAK RECEH)
+                        # A. Tolak jika transaksi >= 300 tapi nilai order rata-rata < $25 (Bot Receh)
                         if h1_tx_count >= 300:
                             avg_val_h1 = vol_h1 / max(1, h1_tx_count)
                             if avg_val_h1 < 25.0:
                                 logger.info(f"🚫 [DEX] Ditolak: Micro-Bot Trap (Avg order ${avg_val_h1:.1f} < $25 di {h1_tx_count} txns) ({mint})")
                                 continue
 
-                        # 🚫 GEMBOK ANOMALI: RIBUAN TXN TAPI LIKUIDITAS TIDAK NAIK (< $35k)
+                        # B. Tolak jika ribuan transaksi (> 600) tapi likuiditas kolam tidak naik (< $35k)
                         if liq_usd < 35000.0 and h1_tx_count > 600:
                             logger.info(f"🚫 [DEX] Ditolak: Anomali Txn Banyak ({h1_tx_count} txns) tapi Kolam Dangkal (${liq_usd:,.0f}) ({mint})")
                             continue
 
-                        # 🚫 GEMBOK AUDIT RASIO VOLUME VS LIKUIDITAS (ANTI-WASH TRADING)
+                        # C. Tolak Wash-Trading (Volume digelembungkan > 6.5x isi kolam)
                         if liq_usd > 0:
                             vol_liq_h1 = vol_h1 / liq_usd
                             vol_liq_m5 = vol_m5 / liq_usd
-                            
                             if vol_liq_h1 > 6.5:
                                 logger.info(f"🚫 [DEX] Ditolak: Wash Trading H1 {vol_liq_h1:.1f}x > 6.5x ({mint})")
                                 continue
@@ -341,8 +325,11 @@ def poll_dexscreener_early_graduates():
                         if 10.0 <= age_mins <= 60.0:
                             real_top_holder = check_real_top_holder(mint)
                             if real_top_holder > 10.0:
-                                logger.info(f"🚫 [DEX] Ditolak: Top Holder {real_top_holder:.1f}% > 10% ({mint})")
+                                logger.info(f"🚫 [DEX] Ditolak: Top Holder / Rug Risk / Sindikat {real_top_holder:.1f}% ({mint})")
                                 continue
+
+                            txns_m5 = pair.get("txns", {}).get("m5", {})
+                            buys = int(txns_m5.get("buys", 0))
 
                             eval_payload = {
                                 "ageMinutes": age_mins,
@@ -378,7 +365,6 @@ def poll_dexscreener_early_graduates():
             
         time.sleep(45)
 
-
 # =====================================================================
 # FLASK WEB SERVER
 # =====================================================================
@@ -392,7 +378,6 @@ def health():
         "events_received": stats["events_received"],
         "cached_tokens": len(token_cache),
     })
-
 
 @app.route("/test-alert")
 def test_alert():
@@ -423,7 +408,6 @@ def test_alert():
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
-
 # =====================================================================
 # STARTUP ENTRY POINT
 # =====================================================================
@@ -434,7 +418,7 @@ if __name__ == "__main__":
         try:
             bot.send_message(
                 config.TELEGRAM_CHAT_ID,
-                "🛡️ <b>PUMPALPHA BOT v3.2 ONLINE!</b>\nFilter Super Ketat Aktif: 🟡 Pump.fun Radar (Min MC $18k) & 🔵 Dex Graduates (Min Liq $12k).",
+                "🛡️ <b>PUMPALPHA BOT v3.2 ONLINE!</b>\nFilter Super Ketat Aktif: 🟡 Pump.fun Radar (Min MC $18k) & 🔵 Dex Graduates (Min Liq $18k).",
                 parse_mode="HTML",
             )
             logger.info("Notifikasi startup sukses dikirim ke Telegram!")
