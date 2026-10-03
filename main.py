@@ -179,21 +179,38 @@ async def on_token_event(data: dict):
 
     tok["history"].append({"time": current_time, "is_buy": is_buy, "val": usd_val})
 
-    # FILTER KETAT PUMP.FUN:
-    if mc < 18000.0 or mc > 70000.0:
+    # FILTER KETAT PUMP.FUN ANTI-DUMP & ANTI-RUG:
+    if mc < 22000.0 or mc > 70000.0:
         return
 
     bonding_pct = min(100.0, (tok["bonding_curve"] / 85.0) * 100.0) if tok["bonding_curve"] > 0 else 0.0
-    if bonding_pct > 0 and (bonding_pct < 25.0 or bonding_pct > 80.0):
+    # Kunci area akumulasi sehat sebelum dev/cabal buang barang
+    if bonding_pct > 0 and (bonding_pct < 35.0 or bonding_pct > 75.0):
         return
 
     age_mins = (current_time - tok["first_seen"]) / 60.0
-    if age_mins < 10.0:
+    if age_mins < 12.0:
         return
 
     real_top_holder = check_real_top_holder(mint)
-    if real_top_holder > 10.0:
+    if real_top_holder > 8.0:
         return
+
+    # 🛑 FILTER WAJIB: Tolak koin yang sepi pemegang (< 300 holders) atau RugCheck Score Bahaya (> 400)
+    try:
+        rc_url = f"https://api.rugcheck.xyz/v1/tokens/{mint}/report"
+        r_req = urllib.request.Request(rc_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(r_req, timeout=4) as r_resp:
+            rc_data = json.loads(r_resp.read().decode('utf-8'))
+            rc_score = int(rc_data.get("score") or 0)
+            rc_holders = int(rc_data.get("totalHolders") or 0)
+            
+            # Koin scam/mati seperti $BTC hanya punya 180 holders dan score 2700
+            if rc_score > 400 or rc_holders < 300:
+                logger.info(f"🚫 [PumpFun-Reject] Ditolak: Holders tidak organik ({rc_holders} < 300) atau Skor Bahaya ({rc_score}) ({mint})")
+                return
+    except Exception:
+        pass
 
     eval_payload = {
         "ageMinutes": age_mins,
